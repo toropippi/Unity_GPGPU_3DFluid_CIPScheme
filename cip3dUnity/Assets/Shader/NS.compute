@@ -1,0 +1,861 @@
+﻿//TO_DO
+//変数名リファクタリング
+//平均化するところを4平均ではなく三次補完で
+//渦度のところ直す
+//newgradも直す
+//pressure直す
+
+//#pragma kernel CSMain
+#pragma kernel Veloc0
+#pragma kernel Veloc1
+#pragma kernel AdvectionCIP
+#pragma kernel Newgrad_x
+#pragma kernel Newgrad_y
+#pragma kernel Newgrad_z
+#pragma kernel Vorticity
+#pragma kernel ComputeBufferMemcopy_i
+#pragma kernel ComputeBufferMemcopy_f
+#pragma kernel pressure0
+#pragma kernel pressure1
+#pragma kernel div
+#pragma kernel rhs
+#pragma kernel particle_move
+#pragma kernel exforce0
+
+#define SPEEDLIMIT 1.17
+#define blockX 32
+#define blockY 1
+#define blockZ 1
+
+#define WX 32
+#define WY 32
+#define WZ 32
+
+#define DT 1.0
+#define alpha 1.72
+
+//CIPで自分の実装
+#define CIPMyMETHOD
+
+//newgradで自分の実装を選択
+#define NEWGRADMyMETHOD
+
+
+//XYZ系
+RWStructuredBuffer<float> YU;
+RWStructuredBuffer<float> YUN;
+RWStructuredBuffer<float> YV;
+RWStructuredBuffer<float> YVN;
+RWStructuredBuffer<float> YW;
+RWStructuredBuffer<float> YWN;
+StructuredBuffer<float> refYU;
+StructuredBuffer<float> refYUN;
+StructuredBuffer<float> refYV;
+StructuredBuffer<float> refYVN;
+StructuredBuffer<float> refYW;
+StructuredBuffer<float> refYWN;
+
+RWStructuredBuffer<float> YUT;
+RWStructuredBuffer<float> YVT;
+RWStructuredBuffer<float> YWT;
+StructuredBuffer<float> refYUT;
+StructuredBuffer<float> refYVT;
+StructuredBuffer<float> refYWT;
+
+RWStructuredBuffer<float> YUV;
+RWStructuredBuffer<float> YUW;
+RWStructuredBuffer<float> YWU;
+RWStructuredBuffer<float> YWV;
+RWStructuredBuffer<float> YVU;
+RWStructuredBuffer<float> YVW;
+StructuredBuffer<float> refYUV;
+StructuredBuffer<float> refYUW;
+StructuredBuffer<float> refYWU;
+StructuredBuffer<float> refYWV;
+StructuredBuffer<float> refYVU;
+StructuredBuffer<float> refYVW;
+
+StructuredBuffer<float> u;
+StructuredBuffer<float> v;
+StructuredBuffer<float> w;
+
+RWStructuredBuffer<float> fn;
+RWStructuredBuffer<float> gxn;
+RWStructuredBuffer<float> gyn;
+RWStructuredBuffer<float> gzn;
+StructuredBuffer<float> GXd;
+StructuredBuffer<float> GYd;
+StructuredBuffer<float> GZd;
+StructuredBuffer<float> Yd;
+
+RWStructuredBuffer<float> GX,GY,GZ;
+StructuredBuffer<float> y,yn;
+StructuredBuffer<float> dux, duy, duz;
+StructuredBuffer<float> dvx, dvy, dvz;
+StructuredBuffer<float> dwx, dwy, dwz;
+
+//座標関係ないスカラー系
+RWStructuredBuffer<float> VOR;
+RWStructuredBuffer<float> YPN;
+StructuredBuffer<float> refYPN;
+RWStructuredBuffer<float> DIV;
+StructuredBuffer<float> refDIV;
+
+StructuredBuffer<uint> Wall;
+StructuredBuffer<uint> refWallX;
+StructuredBuffer<uint> refWallY;
+StructuredBuffer<uint> refWallZ;
+StructuredBuffer<uint> WallP;
+
+
+//その他
+RWStructuredBuffer<float3> ParticlePos;
+
+
+
+
+// 前回の更新からの経過時間
+float DeltaTime;
+
+/*
+[numthreads(256, 1, 1)]
+void CSMain(uint3 id : SV_DispatchThreadID)
+{
+	// それぞれの位置情報に移動ベクトルを加算
+	float4 spd = 0;
+	uint rd = id.x;
+	rd = rd + 3457349801;
+	rd *= 21896451;
+	rd += 1923458697;
+	rd = (rd >> 13) + (rd % (1 << 13)) * (1 << 13);
+	rd += 2567123453;
+	uint rd2 = rd % 65536;
+	rd /= 65536;
+	float rad1 = 0.001 * rd;
+	float rad2 = 0.001 * rd2;
+
+
+	spd.x = sin(rad1) * cos(rad2);
+	spd.y = cos(rad1) * cos(rad2);
+	spd.z = sin(rad2);
+	spd.w = 0.0;
+	Bullets[id.x] += spd * DeltaTime;
+}*/
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+// TO_DO 非移流項の他の計算も追加予定
+//__kernel void newgrad(__global double* yn, __global double* y, __global double* GX, __global double* GY, __global double* GZ, __global uchar* Wall) {
+[numthreads(blockX, blockY, blockZ)]
+void Newgrad_x(int3 id : SV_DispatchThreadID) {
+	int i = id.x;
+	int j = id.y;
+	int k = id.z;
+	int i0 = (i - 1 + WX) % WX;
+	int i1 = (i + 1) % WX;
+	int j0 = (j - 1 + WY) % WY;
+	int j1 = (j + 1) % WY;
+	int k0 = (k - 1 + WZ) % WZ;
+	int k1 = (k + 1) % WZ;
+	j *= WX;
+	j0 *= WX;
+	j1 *= WX;
+	k *= WX * WY;
+	k0 *= WX * WY;
+	k1 *= WX * WY;
+	int ijk = i + j + k;
+
+
+
+#ifdef NEWGRADMyMETHOD
+	float oGX = GX[ijk];
+	float oGY = GY[ijk];
+	float oGZ = GZ[ijk];
+
+
+	//float dudx = (u[i1 + j + k] - u[i0 + j + k]) * 0.15f * DT;
+	float dudx = dux[ijk] * DT * 0.1;
+	float dvdx = (dvx[i + j1 + k] + dvx[i + j + k] + dvx[i0 + j1 + k] + dvx[i0 + j + k]) * 0.25f * DT;//x方向微分の値を4つ使う
+	float dwdx = (dwx[i + j + k1] + dwx[i + j + k] + dwx[i0 + j + k1] + dwx[i0 + j + k]) * 0.25f * DT;//x方向微分の値を4つ使う
+	//float dudy = (u[i + j1 + k] - u[i + j0 + k]) * 0.15f * DT;
+	float dudy = duy[ijk] * DT * 0.1;
+	float dvdy = (dvy[i + j1 + k] + dvy[i0 + j1 + k] + dvy[i + j + k] + dvy[i0 + j + k]) * 0.25f * DT;//y方向微分の値を4つ使う
+	float dwdy = (dwy[i + j + k1] + dwy[i0 + j + k1] + dwy[i + j + k] + dwy[i0 + j + k]) * 0.25f * DT;//y方向微分の値を4つ使う
+	//float dudz = (u[i + j + k1] - u[i + j + k0]) * 0.15f * DT;
+	float dudz = duz[ijk] * DT * 0.1;
+	float dvdz = (dvz[i + j1 + k] + dvz[i0 + j1 + k] + dvz[i + j + k] + dvy[i0 + j + k]) * 0.25f * DT;//z方向微分の値を4つ使う
+	float dwdz = (dwz[i + j + k1] + dwz[i0 + j + k1] + dwz[i + j + k] + dwz[i0 + j + k]) * 0.25f * DT;//y方向微分の値を4つ使う
+
+	if (Wall[ijk] > 128)
+	{
+		GX[ijk] = oGX + (yn[i1 + j + k] - yn[i0 + j + k] - y[i1 + j + k] + y[i0 + j + k]) * 0.5f
+			- oGX * dudx - oGY * dvdx - oGZ * dwdx;
+		GY[ijk] = oGY + (yn[i + j1 + k] - yn[i + j0 + k] - y[i + j1 + k] + y[i + j0 + k]) * 0.5f
+			- oGX * dudy - oGY * dvdy - oGZ * dwdy;
+		GZ[ijk] = oGZ + (yn[i + j + k1] - yn[i + j + k0] - y[i + j + k1] + y[i + j + k0]) * 0.5f
+			- oGX * dudz - oGY * dvdz - oGZ * dwdz;
+	}
+#else
+	
+	if (Wall[ijk] > 128) {
+		GX[ijk] += (yn[i1 + j + k] - yn[i0 + j + k] - y[i1 + j + k] + y[i0 + j + k]) * 0.5;
+		GY[ijk] += (yn[i + j1 + k] - yn[i + j0 + k] - y[i + j1 + k] + y[i + j0 + k]) * 0.5;
+		GZ[ijk] += (yn[i + j + k1] - yn[i + j + k0] - y[i + j + k1] + y[i + j + k0]) * 0.5;
+	}
+#endif
+}
+
+
+// TO_DO 非移流項の他の計算も追加予定
+//__kernel void newgrad(__global double* yn, __global double* y, __global double* GX, __global double* GY, __global double* GZ, __global uchar* Wall) {
+[numthreads(blockX, blockY, blockZ)]
+void Newgrad_y(int3 id : SV_DispatchThreadID) {
+	int i = id.x;
+	int j = id.y;
+	int k = id.z;
+	int i0 = (i - 1 + WX) % WX;
+	int i1 = (i + 1) % WX;
+	int j0 = (j - 1 + WY) % WY;
+	int j1 = (j + 1) % WY;
+	int k0 = (k - 1 + WZ) % WZ;
+	int k1 = (k + 1) % WZ;
+	j *= WX;
+	j0 *= WX;
+	j1 *= WX;
+	k *= WX * WY;
+	k0 *= WX * WY;
+	k1 *= WX * WY;
+	int ijk = i + j + k;
+#ifdef NEWGRADMyMETHOD
+	float oGX = GX[ijk];
+	float oGY = GY[ijk];
+	float oGZ = GZ[ijk];
+
+	float dudx = (dux[i + j0 + k] + dux[i + j + k] + dux[i1 + j0 + k] + dux[i1 + j + k]) * 0.25f * DT;
+	//float dvdx = (v[i1 + j + k] - v[i0 + j + k]) * 0.15f * DT;
+	float dvdx = dvx[ijk] * DT * 0.1;
+	float dwdx = (dwx[i + j0 + k] + dwx[i + j + k] + dwx[i + j0 + k1] + dwx[i + j + k1]) * 0.25f * DT;
+	float dudy = (duy[i + j0 + k] + duy[i + j + k] + duy[i1 + j0 + k] + duy[i1 + j + k]) * 0.25f * DT;
+	//float dvdy = (v[i + j1 + k] - v[i + j0 + k]) * 0.15f * DT;
+	float dvdy = dvy[ijk] * DT * 0.1;
+	float dwdy = (dwy[i + j0 + k] + dwy[i + j + k] + dwy[i + j0 + k1] + dwy[i + j + k1]) * 0.25f * DT;
+	float dudz = (duz[i + j0 + k] + duz[i + j + k] + duz[i1 + j0 + k] + duz[i1 + j + k]) * 0.25f * DT;
+	//float dvdz = (v[i + j + k1] - v[i + j + k0]) * 0.15f * DT;
+	float dvdz = dvz[ijk] * DT * 0.1;
+	float dwdz = (dwz[i + j0 + k] + dwz[i + j + k] + dwz[i + j0 + k1] + dwz[i + j + k1]) * 0.25f * DT;
+
+	if (Wall[ijk] > 128)
+	{
+		GX[ijk] = oGX + (yn[i1 + j + k] - yn[i0 + j + k] - y[i1 + j + k] + y[i0 + j + k]) * 0.5f
+			- oGX * dudx - oGY * dvdx - oGZ * dwdx;
+		GY[ijk] = oGY + (yn[i + j1 + k] - yn[i + j0 + k] - y[i + j1 + k] + y[i + j0 + k]) * 0.5f
+			- oGX * dudy - oGY * dvdy - oGZ * dwdy;
+		GZ[ijk] = oGZ + (yn[i + j + k1] - yn[i + j + k0] - y[i + j + k1] + y[i + j + k0]) * 0.5f
+			- oGX * dudz - oGY * dvdz - oGZ * dwdz;
+	}
+
+#else
+	if (Wall[ijk] > 128) {
+		GX[ijk] += (yn[i1 + j + k] - yn[i0 + j + k] - y[i1 + j + k] + y[i0 + j + k]) * 0.5;
+		GY[ijk] += (yn[i + j1 + k] - yn[i + j0 + k] - y[i + j1 + k] + y[i + j0 + k]) * 0.5;
+		GZ[ijk] += (yn[i + j + k1] - yn[i + j + k0] - y[i + j + k1] + y[i + j + k0]) * 0.5;
+	}
+#endif
+}
+
+
+// TO_DO 非移流項の他の計算も追加予定
+//__kernel void newgrad(__global double* yn, __global double* y, __global double* GX, __global double* GY, __global double* GZ, __global uchar* Wall) {
+[numthreads(blockX, blockY, blockZ)]
+void Newgrad_z(int3 id : SV_DispatchThreadID) {
+
+	int i = id.x;
+	int j = id.y;
+	int k = id.z;
+	int i0 = (i - 1 + WX) % WX;
+	int i1 = (i + 1) % WX;
+	int j0 = (j - 1 + WY) % WY;
+	int j1 = (j + 1) % WY;
+	int k0 = (k - 1 + WZ) % WZ;
+	int k1 = (k + 1) % WZ;
+	j *= WX;
+	j0 *= WX;
+	j1 *= WX;
+	k *= WX * WY;
+	k0 *= WX * WY;
+	k1 *= WX * WY;
+	int ijk = i + j + k;
+
+#ifdef NEWGRADMyMETHOD
+	float oGX = GX[ijk];
+	float oGY = GY[ijk];
+	float oGZ = GZ[ijk];
+
+	float dudx = (dux[i + j + k0] + dux[i + j + k] + dux[i1 + j + k0] + dux[i1 + j + k]) * 0.25f * DT;
+	float dvdx = (dvx[i + j + k0] + dvx[i + j + k] + dvx[i + j1 + k0] + dvx[i + j1 + k]) * 0.25f * DT;
+	//float dwdx = (w[i1 + j + k] - w[i0 + j + k]) * 0.15f * DT;
+	float dwdx = dwx[ijk] * DT * 0.1;
+	float dudy = (duy[i + j + k0] + duy[i + j + k] + duy[i1 + j + k0] + duy[i1 + j + k]) * 0.25f * DT;
+	float dvdy = (dvy[i + j + k0] + dvy[i + j + k] + dvy[i + j1 + k0] + dvy[i + j1 + k]) * 0.25f * DT;
+	//float dwdy = (w[i + j1 + k] - w[i + j0 + k]) * 0.15f * DT;
+	float dwdy = dwy[ijk] * DT * 0.1;
+	float dudz = (duz[i + j + k0] + duz[i + j + k] + duz[i1 + j + k0] + duz[i1 + j + k]) * 0.25f * DT;
+	float dvdz = (dvz[i + j + k0] + dvz[i + j + k] + dvz[i + j1 + k0] + dvz[i + j1 + k]) * 0.25f * DT;
+	//float dwdz = (w[i + j + k1] - w[i + j + k0]) * 0.15f * DT;
+	float dwdz = dwz[ijk] * DT * 0.1;
+
+	if (Wall[ijk] > 128)
+	{
+		GX[ijk] = oGX + (yn[i1 + j + k] - yn[i0 + j + k] - y[i1 + j + k] + y[i0 + j + k]) * 0.5f
+			- oGX * dudx - oGY * dvdx - oGZ * dwdx;
+		GY[ijk] = oGY + (yn[i + j1 + k] - yn[i + j0 + k] - y[i + j1 + k] + y[i + j0 + k]) * 0.5f
+			- oGX * dudy - oGY * dvdy - oGZ * dwdy;
+		GZ[ijk] = oGZ + (yn[i + j + k1] - yn[i + j + k0] - y[i + j + k1] + y[i + j + k0]) * 0.5f
+			- oGX * dudz - oGY * dvdz - oGZ * dwdz;
+	}
+
+#else
+	if (Wall[ijk] > 128) {
+		GX[ijk] += (yn[i1 + j + k] - yn[i0 + j + k] - y[i1 + j + k] + y[i0 + j + k]) * 0.5;
+		GY[ijk] += (yn[i + j1 + k] - yn[i + j0 + k] - y[i + j1 + k] + y[i + j0 + k]) * 0.5;
+		GZ[ijk] += (yn[i + j + k1] - yn[i + j + k0] - y[i + j + k1] + y[i + j + k0]) * 0.5;
+	}
+#endif
+}
+
+
+
+
+
+
+
+
+
+
+
+
+[numthreads(blockX, blockY, blockZ)]
+void AdvectionCIP(int3 id : SV_DispatchThreadID) {
+//__kernel void dcip0(__global float* fn, __global float* gxn, __global float* gyn, __global float* gzn, __global float* u, __global float* v, __global float* w, __global float* GXd, __global float* GYd, __global float* GZd, __global float* Yd, float DT, __global uchar* Wall) {
+
+	//ここで使う配列の意味
+	//u,v,wは下記の通り
+	//移流させたいスカラー場をfとする
+	//fnはfの移流後
+	//gxnはスカラー場fのx方向微分のスカラー場、移流後
+	//gynはスカラー場fのy方向微分のスカラー場、移流後
+	//gznはスカラー場fのz方向微分のスカラー場、移流後
+	//GXdはスカラー場fのx方向微分のスカラー場、移流前
+	//GYdはスカラー場fのy方向微分のスカラー場、移流前
+	//GWdはスカラー場fのz方向微分のスカラー場、移流前
+	//Ydはfの移流前
+	//Wallは、fの定義面が壁に埋まっているかいないかの情報
+	int i = id.x;
+	int j = id.y;
+	int k = id.z;
+	float a1;
+	float b1;
+	float c1;
+	float d1;
+	float f1;
+	float e1;
+	float g1;
+	float h1;
+	float i1;
+	float j1;
+	float k1;
+	float l1;
+	float m1;
+	float n1;
+	float p1;
+	float r1;
+	float s1;
+	float t1;
+	float u1;
+	float w1;
+
+	int ijk = i + (j + k * WY) * WX;
+	float xx = -u[ijk] * DT;//この移流を計算するのが"u"速度のときu座標系からみたuの速度・・・これが"v","w"もある
+	float yy = -v[ijk] * DT;//この移流を計算するのが"u"速度のときu座標系からみたvの速度・・・これが"v","w"もある
+	float zz = -w[ijk] * DT;//この移流を計算するのが"u"速度のときu座標系からみたwの速度・・・これが"v","w"もある
+
+	float isn;
+	float jsn;
+	float ksn;
+
+	//if (xx>0.0){isn=-1.0;}else{isn=1.0;}
+	//if (yy>0.0){jsn=-1.0;}else{jsn=1.0;}
+	//if (zz>0.0){ksn=-1.0;}else{ksn=1.0;}
+	isn = 1.0 - 2.0 * (xx >= 0.0);
+	jsn = 1.0 - 2.0 * (yy >= 0.0);
+	ksn = 1.0 - 2.0 * (zz >= 0.0);
+
+	int im1 = (i - (int)isn + WX) % WX;
+	int jm1 = ((j - (int)jsn + WY) % WY) * WX;
+	int km1 = ((k - (int)ksn + WZ) % WZ) * WX * WY;
+	j *= WX;
+	k *= WX * WY;
+
+	c1 = GXd[ijk];
+	g1 = GYd[ijk];
+	m1 = GZd[ijk];
+	d1 = Yd[ijk];
+
+	a1 = d1 - Yd[im1 + j + k] - Yd[i + jm1 + k] + Yd[im1 + jm1 + k];
+	e1 = d1 - Yd[i + jm1 + k] - Yd[i + j + km1] + Yd[i + jm1 + km1];
+	k1 = d1 - Yd[i + j + km1] - Yd[im1 + j + k] + Yd[im1 + j + km1];
+
+	j1 = -(GYd[im1 + j + k] - g1) * isn;
+	n1 = -(GXd[i + j + km1] - c1) * ksn;
+	w1 = -(GZd[i + jm1 + k] - m1) * jsn;
+
+	h1 = -(GXd[i + jm1 + k] - c1) * jsn;
+	s1 = -(GYd[i + j + km1] - g1) * ksn;
+	u1 = -(GZd[im1 + j + k] - m1) * isn;
+
+	i1 = j1 + h1 - a1 * isn * jsn;
+	p1 = n1 + u1 - k1 * isn * ksn;
+	r1 = w1 + s1 - e1 * jsn * ksn;
+
+	t1 = Yd[im1 + jm1 + km1] + Yd[i + j + km1] - a1 - Yd[im1 + j + km1] - Yd[i + jm1 + km1];
+	t1 *= -isn * jsn * ksn;
+
+	j1 = -(a1 * isn - j1 * jsn);
+	n1 = -(k1 * ksn - n1 * isn);
+	w1 = -(e1 * jsn - w1 * ksn);
+
+	h1 = -(a1 * jsn - h1 * isn);
+	s1 = -(e1 * ksn - s1 * jsn);
+	u1 = -(k1 * isn - u1 * ksn);
+
+	a1 = d1 - Yd[im1 + j + k];
+	e1 = d1 - Yd[i + jm1 + k];
+	k1 = d1 - Yd[i + j + km1];
+
+	b1 = -3.0 * a1 + (2.0 * c1 + GXd[im1 + j + k]) * isn;
+	f1 = -3.0 * e1 + (2.0 * g1 + GYd[i + jm1 + k]) * jsn;
+	l1 = -3.0 * k1 + (2.0 * m1 + GZd[i + j + km1]) * ksn;
+
+	a1 = (GXd[im1 + j + k] + c1 - 2.0 * a1 * isn) * xx;
+	e1 = (GYd[i + jm1 + k] + g1 - 2.0 * e1 * jsn) * yy;
+	k1 = (GZd[i + j + km1] + m1 - 2.0 * k1 * ksn) * zz;
+
+
+
+	if (Wall[ijk] > 128) {
+		d1 += ((a1 + b1 + h1 * yy + n1 * zz) * xx + c1 + (i1 + j1 * yy + t1 * zz) * yy + (u1 * zz + p1) * zz) * xx;
+		d1 += ((e1 + f1 + s1 * zz) * yy + (w1 * zz + r1) * zz + g1) * yy + ((k1 + l1) * zz + m1) * zz;
+		fn[ijk] = clamp(d1, -2.29, 2.29);
+	}
+
+
+	a1 = (3.0 * a1 + 2.0 * (b1 + h1 * yy + n1 * zz)) * xx + c1 + yy * (j1 * yy + i1 + t1 * zz) + zz * (p1 + u1 * zz);
+	e1 = (3.0 * e1 + 2.0 * (f1 + j1 * xx + s1 * zz)) * yy + g1 + xx * (h1 * xx + i1 + t1 * zz) + zz * (r1 + w1 * zz);
+	k1 = (3.0 * k1 + 2.0 * (l1 + u1 * xx + w1 * yy)) * zz + m1 + xx * (n1 * xx + p1 + t1 * yy) + yy * (r1 + s1 * yy);
+
+
+#ifdef CIPMyMETHOD
+	//パターン1、非移流項考慮なし
+	if (Wall[ijk] >= 128) {
+		gxn[ijk] = clamp(a1, -SPEEDLIMIT, SPEEDLIMIT);
+	}
+
+	if (Wall[ijk] >= 128) {
+		gyn[ijk] = clamp(e1, -SPEEDLIMIT, SPEEDLIMIT);
+	}
+
+	if (Wall[ijk] >= 128) {
+		gzn[ijk] = clamp(k1, -SPEEDLIMIT, SPEEDLIMIT);
+	}
+#else
+
+	//パターン２、中央差分の精度荒いやつ
+	im1 = (i + WX - 1) % WX + j + k;
+	jm1 = (i + 1) % WX + j + k;
+	if (Wall[ijk] >= 128) {
+		gxn[ijk] = 1.0 * clamp(a1 - 0.5 * DT * (a1 * (u[jm1] - u[im1]) + e1 * (v[jm1] - v[im1]) + k1 * (w[jm1] - w[im1])), -SPEEDLIMIT, SPEEDLIMIT);
+	}
+
+	im1 = ((j / WX + WY - 1) % WY) * WX + i + k;
+	jm1 = ((j / WX + 1) % WY) * WX + i + k;
+	if (Wall[ijk] >= 128) {
+		gyn[ijk] = 1.0 * clamp(e1 - 0.5 * DT * (a1 * (u[jm1] - u[im1]) + e1 * (v[jm1] - v[im1]) + k1 * (w[jm1] - w[im1])), -SPEEDLIMIT, SPEEDLIMIT);
+	}
+
+	im1 = ((k / WX / WY + WZ - 1) % WZ) * WX * WY + i + j;
+	jm1 = ((k / WX / WY + 1) % WZ) * WX * WY + i + j;
+	if (Wall[ijk] >= 128) {
+		gzn[ijk] = 1.0 * clamp(k1 - 0.5 * DT * (a1 * (u[jm1] - u[im1]) + e1 * (v[jm1] - v[im1]) + k1 * (w[jm1] - w[im1])), -SPEEDLIMIT, SPEEDLIMIT);
+	}
+#endif
+
+	
+
+
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+[numthreads(blockX, blockY, blockZ)]
+//__kernel void pressure0(__global double* DIV, __global double* YPN, __global uchar* WallP) {
+void pressure0(int3 id : SV_DispatchThreadID) {
+	int i = id.x;
+	int j = id.y;
+	int k = id.z;
+	int i0 = (i + WX - 1) % WX;
+	int i1 = (i + 1) % WX;
+	int j0 = ((j + WY - 1) % WY) * WX;
+	int j1 = ((j + 1) % WY) * WX;
+	int k0 = ((k + WZ - 1) % WZ) * WX * WY;
+	int k1 = ((k + 1) % WZ) * WX * WY;
+
+	int ijk = i + (j + k * WY) * WX;
+	double ff = refDIV[ijk];
+
+	if (((i + j + k) % 2) == 0) {
+		j *= WX;
+		k *= WX * WY;
+		double p = YPN[ijk];
+		if (WallP[i0 + j + k] != 0) { ff -= YPN[i0 + j + k]; }
+		else { ff -= p; }
+		if (WallP[i1 + j + k] != 0) { ff -= YPN[i1 + j + k]; }
+		else { ff -= p; }
+		if (WallP[i + j0 + k] != 0) { ff -= YPN[i + j0 + k]; }
+		else { ff -= p; }
+		if (WallP[i + j1 + k] != 0) { ff -= YPN[i + j1 + k]; }
+		else { ff -= p; }
+		if (WallP[i + j + k0] != 0) { ff -= YPN[i + j + k0]; }
+		else { ff -= p; }
+		if (WallP[i + j + k1] != 0) { ff -= YPN[i + j + k1]; }
+		else { ff -= p; }
+
+		YPN[ijk] += (-0.1666666666666666666667 * ff - p) * alpha * (WallP[ijk] > 128);
+	}
+}
+
+
+[numthreads(blockX, blockY, blockZ)]
+//__kernel void pressure1(__global double* DIV, __global double* YPN, __global uchar* WallP) {
+void pressure1(int3 id : SV_DispatchThreadID) {
+	int i = id.x;
+	int j = id.y;
+	int k = id.z;
+	int i0 = (i + WX - 1) % WX;
+	int i1 = (i + 1) % WX;
+	int j0 = ((j + WY - 1) % WY) * WX;
+	int j1 = ((j + 1) % WY) * WX;
+	int k0 = ((k + WZ - 1) % WZ) * WX * WY;
+	int k1 = ((k + 1) % WZ) * WX * WY;
+
+	int ijk = i + (j + k * WY) * WX;
+	double ff = refDIV[ijk];
+
+	if (((i + j + k) % 2) == 1) {
+		j *= WX;
+		k *= WX * WY;
+		double p = YPN[ijk];
+		if (WallP[i0 + j + k] != 0) { ff -= YPN[i0 + j + k]; }
+		else { ff -= p; }
+		if (WallP[i1 + j + k] != 0) { ff -= YPN[i1 + j + k]; }
+		else { ff -= p; }
+		if (WallP[i + j0 + k] != 0) { ff -= YPN[i + j0 + k]; }
+		else { ff -= p; }
+		if (WallP[i + j1 + k] != 0) { ff -= YPN[i + j1 + k]; }
+		else { ff -= p; }
+		if (WallP[i + j + k0] != 0) { ff -= YPN[i + j + k0]; }
+		else { ff -= p; }
+		if (WallP[i + j + k1] != 0) { ff -= YPN[i + j + k1]; }
+		else { ff -= p; }
+
+		YPN[ijk] += (-0.1666666666666666666667 * ff - p) * alpha * (WallP[ijk] > 128);
+	}
+}
+
+
+
+[numthreads(blockX, blockY, blockZ)]
+//__kernel void div(__global double* DIV, __global double* YU, __global double* YV, __global double* YW) {
+void div(int3 id : SV_DispatchThreadID) {
+	int i = id.x;
+	int j = id.y;
+	int k = id.z;
+	int i1 = (i + 1) % WX;
+	int j1 = (j + 1) % WY;
+	int k1 = (k + 1) % WZ;
+	j *= WX;
+	j1 *= WX;
+	k *= WX * WY;
+	k1 *= WX * WY;
+	int ijk = i + j + k;
+	DIV[ijk] = (refYU[i1 + j + k] - refYU[ijk] + refYV[i + j1 + k] - refYV[ijk] + refYW[i + j + k1] - refYW[ijk]);
+}
+
+
+
+[numthreads(blockX, blockY, blockZ)]
+//__kernel void rhs(__global double* YUN, __global double* YVN, __global double* YWN, __global double* YPN, __global uchar* kabeX, __global uchar* kabeY, __global uchar* kabeZ) {
+void rhs(int3 id : SV_DispatchThreadID) {
+	int i = id.x;
+	int j = id.y;
+	int k = id.z;
+	int i0 = (i - 1 + WX) % WX;
+	int j0 = (j - 1 + WY) % WY;
+	int k0 = (k - 1 + WZ) % WZ;
+	j *= WX;
+	j0 *= WX;
+	k *= WX * WY;
+	k0 *= WX * WY;
+	int ijk = i + j + k;
+	if (refWallX[ijk] != 0) { YUN[ijk] -= (refYPN[ijk] - refYPN[i0 + j + k]); }
+	if (refWallY[ijk] != 0) { YVN[ijk] -= (refYPN[ijk] - refYPN[i + j0 + k]); }
+	if (refWallZ[ijk] != 0) { YWN[ijk] -= (refYPN[ijk] - refYPN[i + j + k0]); }
+}
+
+
+
+
+
+//別軸に速度を適応するときの計算その１
+//__kernel void Veloc0(__global float* YU, __global float* YV, __global float* YW, __global float* YUT, __global float* YVT, __global float* YWT) {
+[numthreads(blockX, blockY, blockZ)]
+void Veloc0(int3 id : SV_DispatchThreadID){
+	int i = id.x;
+	int j = id.y;
+	int k = id.z;
+	int i1 = (i + 1) % WX;
+	int j1 = (j + 1) % WY;
+	int k1 = (k + 1) % WZ;
+	j *= WX;
+	j1 *= WX;
+	k *= WX * WY;
+	k1 *= WX * WY;
+	int ijk = i + j + k;
+
+	YUT[ijk] = 0.5 * (YU[ijk] + YU[i1 + j + k]);
+	YVT[ijk] = 0.5 * (YV[ijk] + YV[i + j1 + k]);
+	YWT[ijk] = 0.5 * (YW[ijk] + YW[i + j + k1]);
+}
+
+//別軸に速度を適応するときの計算その２
+//YUV[0][1][0]はy座標系からみた(0,1,0)位置のu速度=0.25*(u[0][0][0]+u[1][0][0]+u[0][1][0]+u[1][1][0])
+//__kernel void Veloc1(__global float* YUT, __global float* YVT, __global float* YWT, __global float* YUV, __global float* YWV, __global float* YVU, __global float* YWU, __global float* YUW, __global float* YVW) {
+[numthreads(blockX, blockY, blockZ)]
+void Veloc1(int3 id : SV_DispatchThreadID){
+	int i = id.x;
+	int j = id.y;
+	int k = id.z;
+	int i0 = (i - 1 + WX) % WX;
+	int j0 = (j - 1 + WY) % WY;
+	int k0 = (k - 1 + WZ) % WZ;
+	j *= WX;
+	j0 *= WX;
+	k *= WX * WY;
+	k0 *= WX * WY;
+	int ijk = i + j + k;
+
+	YUV[ijk] = 0.5 * (refYUT[ijk] + refYUT[i + j0 + k]);
+	YWV[ijk] = 0.5 * (refYWT[ijk] + refYWT[i + j0 + k]);
+	YVU[ijk] = 0.5 * (refYVT[ijk] + refYVT[i0 + j + k]);
+	YWU[ijk] = 0.5 * (refYWT[ijk] + refYWT[i0 + j + k]);
+	YUW[ijk] = 0.5 * (refYUT[ijk] + refYUT[i + j + k0]);
+	YVW[ijk] = 0.5 * (refYVT[ijk] + refYVT[i + j + k0]);
+}
+
+
+
+
+
+
+
+
+
+
+//渦度
+[numthreads(blockX, blockY, blockZ)]
+void Vorticity(int2 id : SV_DispatchThreadID)
+{
+	int i = id.x;
+	int j = id.y;
+	int i0 = (i - 1 + WX) % WX;
+	int i1 = (i + 1) % WX;
+	int j0 = (j - 1 + WY) % WY;
+	int j1 = (j + 1) % WY;
+	j *= WX;
+	j0 *= WX;
+	j1 *= WX;
+	float uu = YUN[i + j0];
+	float ud = YUN[i + j];
+	float vl = YVN[i0 + j];
+	float vr = YVN[i + j];
+	//右回りを正とする
+	float vor = uu - ud + vr - vl;
+	VOR[i + j] = vor;
+}
+
+
+
+
+
+//粒子座標計算
+[numthreads(64, 1, 1)]
+void particle_move(uint id : SV_DispatchThreadID){
+//__kernel void ryuusi(__global float* ParticlePos, __global double* YUN, __global double* YVN, __global double* YWN, double DT) {
+	uint di = id;
+	float xx = ParticlePos[di].x;
+	float yy = ParticlePos[di].y;
+	float zz = ParticlePos[di].z;
+
+	int ixx = xx;
+	int iyy = yy;
+	int izz = zz;
+
+	float sxx = xx - ixx;
+	float syy = yy - iyy;
+	float szz = zz - izz;
+
+	int im1 = (ixx + 1) % WX;
+	int jm1 = ((iyy + 1) % WY) * WX;
+	int km1 = ((izz + 1) % WZ) * WX * WY;
+	iyy *= WX;
+	izz *= WX * WY;
+
+	xx += ((
+		((1.0 - sxx) * YUN[ixx + iyy + izz] + sxx * YUN[im1 + iyy + izz]) * (1.0 - syy)
+		+ ((1.0 - sxx) * YUN[ixx + jm1 + izz] + sxx * YUN[im1 + jm1 + izz]) * (syy)
+		) * (1.0 - szz) + (
+		((1.0 - sxx) * YUN[ixx + iyy + km1] + sxx * YUN[im1 + iyy + km1]) * (1.0 - syy)
+			+ ((1.0 - sxx) * YUN[ixx + jm1 + km1] + sxx * YUN[im1 + jm1 + km1]) * (syy)
+			) * (szz)) * DT;
+
+	yy += ((
+		((1.0 - sxx) * YVN[ixx + iyy + izz] + sxx * YVN[im1 + iyy + izz]) * (1.0 - syy)
+		+ ((1.0 - sxx) * YVN[ixx + jm1 + izz] + sxx * YVN[im1 + jm1 + izz]) * (syy)
+		) * (1.0 - szz) + (
+		((1.0 - sxx) * YVN[ixx + iyy + km1] + sxx * YVN[im1 + iyy + km1]) * (1.0 - syy)
+			+ ((1.0 - sxx) * YVN[ixx + jm1 + km1] + sxx * YVN[im1 + jm1 + km1]) * (syy)
+			) * (szz)) * DT;
+
+	zz += ((
+		((1.0 - sxx) * YWN[ixx + iyy + izz] + sxx * YWN[im1 + iyy + izz]) * (1.0 - syy)
+		+ ((1.0 - sxx) * YWN[ixx + jm1 + izz] + sxx * YWN[im1 + jm1 + izz]) * (syy)
+		) * (1.0 - szz) + (
+		((1.0 - sxx) * YWN[ixx + iyy + km1] + sxx * YWN[im1 + iyy + km1]) * (1.0 - syy)
+			+ ((1.0 - sxx) * YWN[ixx + jm1 + km1] + sxx * YWN[im1 + jm1 + km1]) * (syy)
+			) * (szz)) * DT;
+	/*
+	if (xx>=(1.0*WX)){xx-=(1.0*WX);}
+	if (yy>=(1.0*WY)){yy-=(1.0*WY);}
+	if (zz>=(1.0*WZ)){zz-=(1.0*WZ);}
+	if (xx<0.0){xx+=(1.0*WX);}
+	if (yy<0.0){yy+=(1.0*WY);}
+	if (zz<0.0){zz+=(1.0*WZ);}
+	*/
+
+	if ((xx >= (1.0 * WX) - 0.2)| (xx < 0.2)) { xx = 1.0 * (di % WX) + 0.5; }
+	if ((yy >= (1.0 * WY) - 0.2)| (yy < 0.2)) { yy = 1.0 * ((di/WX) % WY) + 0.5; }
+	if ((zz >= (1.0 * WZ) - 0.2)| (zz < 0.2)) { zz = 1.0 * ((di/WX/WY) % WZ) + 0.5; }
+
+	ParticlePos[di].x = xx;
+	ParticlePos[di].y = yy;
+	ParticlePos[di].z = zz;
+}
+
+
+
+
+
+
+//粒子座標計算
+[numthreads(1, 1, 1)]
+void exforce0(uint id : SV_DispatchThreadID) {
+
+	for (int x = 16 - 5; x < 16 + 5; x++)
+	{
+		for (int y = 16 - 5; y < 16 + 5; y++) 
+		{
+			YUN[9 + x * WX + y * WX * WY] = 0.3 + 0.11 * (x % 2) + 0.11 * (y % 2);
+		}
+	}
+	
+	for (int x = 16 - 3; x < 16 + 3; x++)
+	{
+		for (int y = 16 - 3; y < 16 + 3; y++)
+		{
+			YUN[23 + x * WX + y * WX * WY] = -0.15 - 0.05 * (x % 3 + 2) - 0.05 * (y % 3 + 2);
+		}
+	}
+	
+	/*
+	YUN[22 + 17 * WX + 17 * WX * WY] = -0.29;
+	YUN[22 + 17 * WX + 16 * WX * WY] = -0.29;
+	YUN[22 + 16 * WX + 17 * WX * WY] = -0.29;
+	YUN[22 + 16 * WX + 16 * WX * WY] = -0.29;
+	*/
+}
+
+
+
+
+
+
+RWStructuredBuffer<uint> DATADSTI, DATASRCI;
+RWStructuredBuffer<float> DATADSTF, DATASRCF;
+uint SIZE;//データコピーの際に使用する
+uint OFFSETDST;//データコピーの際に使用する
+uint OFFSETSRC;//データコピーの際に使用する
+
+//配列コピーint版、完全コピー用
+[numthreads(64, 1, 1)]
+void ComputeBufferMemcopy_i(uint id : SV_DispatchThreadID)
+{
+	if (id < SIZE) {
+		DATADSTI[id + OFFSETDST] = DATASRCI[id + OFFSETSRC];
+	}
+}
+
+
+//配列コピーfloat版、完全コピー用
+[numthreads(64, 1, 1)]
+void ComputeBufferMemcopy_f(uint id : SV_DispatchThreadID)
+{
+	if (id < SIZE) {
+		DATADSTF[id+ OFFSETDST] = DATASRCF[id+ OFFSETSRC];
+	}
+}
