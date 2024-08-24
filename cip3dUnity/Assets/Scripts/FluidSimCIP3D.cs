@@ -1,27 +1,16 @@
 ﻿using UnityEngine;
 using System.Runtime.InteropServices;
-
+using UnityEngine.UI;
+using Const;
 
 /// <summary>
 /// 沢山の弾を管理するクラス
 /// </summary>
 public class FluidSimCIP3D : MonoBehaviour
 {
-    public const int WX = 32;
-    public const int WY = 32;
-    public const int WZ = 32;
-    public const int PARTICLENUM = 65536 * 16;
-    const int blockX = 32;
-    const int blockY = 1;
-    const int blockZ = 1;
-
-    const int WXYZ = WX * WY * WZ;
-
     //下記のは直接shaderに書き込み
     //const float DT = 1.00f;//デルタタイム
-    //const float MU = 0.0000000001f;//粘性項μ。大きいほどぬめっとしてる
     public ComputeShader NSComputeShader;
-
 
     int kernelVeloc0;
     int kernelVeloc1;
@@ -32,12 +21,14 @@ public class FluidSimCIP3D : MonoBehaviour
     int kernelNewgrad_x;
     int kernelNewgrad_y;
     int kernelNewgrad_z;
+    int kernelNewgrad_t;
     int kernelpressure0;
     int kernelpressure1;
     int kerneldiv;
     int kernelrhs;
     int kernelparticle;
     int kernelexforce0;
+    int kernelray0;
 
     ComputeBuffer YU;//速度値
     ComputeBuffer YUN;//速度値
@@ -45,6 +36,8 @@ public class FluidSimCIP3D : MonoBehaviour
     ComputeBuffer YVN;//速度値
     ComputeBuffer YW;//速度値
     ComputeBuffer YWN;//速度値
+    ComputeBuffer TP;//温度
+    ComputeBuffer TPN;//温度
 
     ComputeBuffer YUT;//U速度平均
     ComputeBuffer YVT;//V速度平均
@@ -66,6 +59,10 @@ public class FluidSimCIP3D : MonoBehaviour
     ComputeBuffer GXW;//w速度x偏微分
     ComputeBuffer GYW;//w速度y偏微分
     ComputeBuffer GZW;//w速度z偏微分
+    ComputeBuffer GXTP;//TPx偏微分
+    ComputeBuffer GYTP;//TPy偏微分
+    ComputeBuffer GZTP;//TPz偏微分
+
     ComputeBuffer GXU_;//u速度x偏微分
     ComputeBuffer GYU_;//u速度y偏微分
     ComputeBuffer GZU_;//u速度z偏微分
@@ -75,6 +72,9 @@ public class FluidSimCIP3D : MonoBehaviour
     ComputeBuffer GXW_;//w速度x偏微分
     ComputeBuffer GYW_;//w速度y偏微分
     ComputeBuffer GZW_;//w速度z偏微分
+    ComputeBuffer GXTP_;//TPx偏微分
+    ComputeBuffer GYTP_;//TPy偏微分
+    ComputeBuffer GZTP_;//TPz偏微分
 
     //座標関係ないスカラー
     ComputeBuffer VOR;
@@ -87,8 +87,21 @@ public class FluidSimCIP3D : MonoBehaviour
     ComputeBuffer WallP;
     //その他
     public ComputeBuffer ParticlePos;//描画でも使う
+    //レイマーチング関連
+    RenderTexture rt;//出力画像
+    [SerializeField] CameraDir cameraDir;
+
 
     int cnt = 0;
+    void Awake()
+    {
+        //RGBA floatで作成
+        rt = new RenderTexture(1024, 1024, 0, RenderTextureFormat.ARGBFloat);
+        rt.enableRandomWrite = true;
+        rt.Create();
+        var rawimage = GameObject.Find("RawImage").GetComponent<RawImage>();
+        rawimage.texture = rt;
+    }
     void Start()
     {
         //GPUメモリ確保
@@ -103,41 +116,62 @@ public class FluidSimCIP3D : MonoBehaviour
     /// </summary>
     void Update()
     {
-        //NSComputeShader.SetFloat("DeltaTime", Time.deltaTime);
-        //NSComputeShader.Dispatch(kernelCSMain, ParticlePos.count / 256, 1, 1);
-
-
         //この時点でYUN,YVN,YWNだけが最新
-        for (int loopf = 0; loopf < 2; loopf++)
+        int loopnum = 2;
+        if (Input.GetKey(KeyCode.Space))
+        {
+            loopnum = 8;
+        }
+
+        for (int loopf = 0; loopf < loopnum; loopf++)
         {
             //移流フェーズ
             CopyBufferToBuffer_f(YU, YUN);
             CopyBufferToBuffer_f(YV, YVN);
             CopyBufferToBuffer_f(YW, YWN);
+            if (CO.isTEMPERATURE)
+                CopyBufferToBuffer_f(TP, TPN);
             Veloc();
             CIP();
             CopyBufferToBuffer_f(YU, YUN);
             CopyBufferToBuffer_f(YV, YVN);
             CopyBufferToBuffer_f(YW, YWN);
+            if (CO.isTEMPERATURE)
+                CopyBufferToBuffer_f(TP, TPN);
 
             //非移流フェーズ
-            if (cnt < 9992)
+            if (cnt < 9992) 
+            {
+                //tmpval0を設定
+                if (cnt < 440)
+                {
+                    NSComputeShader.SetFloat("tmpval0", 1.1f);
+                }
+                else
+                {
+                    NSComputeShader.SetFloat("tmpval0", 0);
+                }
+                    
                 Exforce();
+            }
+                
             Div();
             Pressure();
             Rhs();
             Newgrad();
 
-            Particle_Move();
+            if (CO.isPARTICLE)
+                Particle_Move();
             cnt++;
-
         }
 
-
+        //rtにレイマーチング結果を書き込む
+        if (cnt % 4 == 0)
+            Ray0();
         //最後にガス抜き。毎フレームやらなくてもいいかも
-        GasReleasing();
+        if ((cnt/2) % 256 == 255)
+            GasReleasing();
 
-        
         //キャプチャ
         /*
         if (cnt%1==0)
@@ -146,21 +180,40 @@ public class FluidSimCIP3D : MonoBehaviour
     }
 
 
+
+    void Ray0() 
+    {
+        //cameraDirの関数を使ってセット
+        Vector3 campos = cameraDir.GetCameraPos();
+        Vector3 camdir = cameraDir.GetCameraDir();
+        Vector3 camrightdir = cameraDir.GetCameraRight();
+        Vector3 camupdir = cameraDir.GetCameraUp();
+
+        NSComputeShader.SetVector("campos", new Vector4(campos.x, campos.y, campos.z, 0.0f));
+        NSComputeShader.SetVector("camdir", new Vector4(camdir.x, camdir.y, camdir.z, 0.0f));
+        NSComputeShader.SetVector("camrightdir", new Vector4(camrightdir.x, camrightdir.y, camrightdir.z, 0.0f));
+        NSComputeShader.SetVector("camupdir", new Vector4(camupdir.x, camupdir.y, camupdir.z, 0.0f));
+        NSComputeShader.Dispatch(kernelray0, rt.width / 8, rt.height / 8, 1);
+    }
+
+
+
+
     //圧力の平均値がどんどん高くなっている場合に平均が0になるような処理を
     void GasReleasing()
     {
         //面倒なのでCPUで全部やってる
-        float[] cpudiv = new float[WX * WY * WZ];
+        float[] cpudiv = new float[CO.WX * CO.WY * CO.WZ];
         YPN.GetData(cpudiv);
         float gk = 0.0f;
-        for (int i = 0; i < WXYZ; i++)
+        for (int i = 0; i < CO.WXYZ; i++)
         {
             gk += cpudiv[i];
         }
         //Debug.Log(gk);
-        gk /= WXYZ;
+        gk /= CO.WXYZ;
 
-        for (int i = 0; i < WXYZ; i++)
+        for (int i = 0; i < CO.WXYZ; i++)
         {
             cpudiv[i] -= gk;
         }
@@ -171,10 +224,10 @@ public class FluidSimCIP3D : MonoBehaviour
         if ((cnt % 120) == 0)
         {
             Div();
-            cpudiv = new float[WX * WY * WZ];
+            cpudiv = new float[CO.WX * CO.WY * CO.WZ];
             DIV.GetData(cpudiv);
             gk = 0.0f;
-            for (int i = 0; i < WXYZ; i++)
+            for (int i = 0; i < CO.WXYZ; i++)
             {
                 gk += cpudiv[i] * cpudiv[i];
             }
@@ -192,6 +245,7 @@ public class FluidSimCIP3D : MonoBehaviour
         kernelNewgrad_x = NSComputeShader.FindKernel("Newgrad_x");
         kernelNewgrad_y = NSComputeShader.FindKernel("Newgrad_y");
         kernelNewgrad_z = NSComputeShader.FindKernel("Newgrad_z");
+        kernelNewgrad_t = NSComputeShader.FindKernel("Newgrad_t");
         kernelpressure0 = NSComputeShader.FindKernel("pressure0");
         kernelpressure1 = NSComputeShader.FindKernel("pressure1");
         kerneldiv = NSComputeShader.FindKernel("div");
@@ -199,6 +253,7 @@ public class FluidSimCIP3D : MonoBehaviour
         kernelVorticity = NSComputeShader.FindKernel("Vorticity");
         kernelparticle = NSComputeShader.FindKernel("particle_move");
         kernelexforce0 = NSComputeShader.FindKernel("exforce0");
+        kernelray0 = NSComputeShader.FindKernel("ray0");
 
         kernelcomputebuffermemcopy_i = NSComputeShader.FindKernel("ComputeBufferMemcopy_i");
         kernelcomputebuffermemcopy_f = NSComputeShader.FindKernel("ComputeBufferMemcopy_f");
@@ -207,86 +262,90 @@ public class FluidSimCIP3D : MonoBehaviour
     /// コンピュートバッファの初期化
     void InitializeComputeBuffer()
     {
-        YU = new ComputeBuffer(WXYZ, Marshal.SizeOf(typeof(float)));
-        YUN = new ComputeBuffer(WXYZ, Marshal.SizeOf(typeof(float)));
-        YV = new ComputeBuffer(WXYZ, Marshal.SizeOf(typeof(float)));
-        YVN = new ComputeBuffer(WXYZ, Marshal.SizeOf(typeof(float)));
-        YW = new ComputeBuffer(WXYZ, Marshal.SizeOf(typeof(float)));
-        YWN = new ComputeBuffer(WXYZ, Marshal.SizeOf(typeof(float)));
+        YU = new ComputeBuffer(CO.WXYZ, Marshal.SizeOf(typeof(float)));
+        YUN = new ComputeBuffer(CO.WXYZ, Marshal.SizeOf(typeof(float)));
+        YV = new ComputeBuffer(CO.WXYZ, Marshal.SizeOf(typeof(float)));
+        YVN = new ComputeBuffer(CO.WXYZ, Marshal.SizeOf(typeof(float)));
+        YW = new ComputeBuffer(CO.WXYZ, Marshal.SizeOf(typeof(float)));
+        YWN = new ComputeBuffer(CO.WXYZ, Marshal.SizeOf(typeof(float)));
+        TP = new ComputeBuffer(CO.WXYZ, Marshal.SizeOf(typeof(float)));
+        TPN = new ComputeBuffer(CO.WXYZ, Marshal.SizeOf(typeof(float)));
 
-        YUT = new ComputeBuffer(WXYZ, Marshal.SizeOf(typeof(float)));
-        YVT = new ComputeBuffer(WXYZ, Marshal.SizeOf(typeof(float)));
-        YWT = new ComputeBuffer(WXYZ, Marshal.SizeOf(typeof(float)));
+        YUT = new ComputeBuffer(CO.WXYZ, Marshal.SizeOf(typeof(float)));
+        YVT = new ComputeBuffer(CO.WXYZ, Marshal.SizeOf(typeof(float)));
+        YWT = new ComputeBuffer(CO.WXYZ, Marshal.SizeOf(typeof(float)));
 
-        YUV = new ComputeBuffer(WXYZ, Marshal.SizeOf(typeof(float)));
-        YUW = new ComputeBuffer(WXYZ, Marshal.SizeOf(typeof(float)));
-        YWU = new ComputeBuffer(WXYZ, Marshal.SizeOf(typeof(float)));
-        YWV = new ComputeBuffer(WXYZ, Marshal.SizeOf(typeof(float)));
-        YVU = new ComputeBuffer(WXYZ, Marshal.SizeOf(typeof(float)));
-        YVW = new ComputeBuffer(WXYZ, Marshal.SizeOf(typeof(float)));
+        YUV = new ComputeBuffer(CO.WXYZ, Marshal.SizeOf(typeof(float)));
+        YUW = new ComputeBuffer(CO.WXYZ, Marshal.SizeOf(typeof(float)));
+        YWU = new ComputeBuffer(CO.WXYZ, Marshal.SizeOf(typeof(float)));
+        YWV = new ComputeBuffer(CO.WXYZ, Marshal.SizeOf(typeof(float)));
+        YVU = new ComputeBuffer(CO.WXYZ, Marshal.SizeOf(typeof(float)));
+        YVW = new ComputeBuffer(CO.WXYZ, Marshal.SizeOf(typeof(float)));
 
-        GXU = new ComputeBuffer(WXYZ, Marshal.SizeOf(typeof(float)));
-        GYU = new ComputeBuffer(WXYZ, Marshal.SizeOf(typeof(float)));
-        GZU = new ComputeBuffer(WXYZ, Marshal.SizeOf(typeof(float)));
-        GXV = new ComputeBuffer(WXYZ, Marshal.SizeOf(typeof(float)));
-        GYV = new ComputeBuffer(WXYZ, Marshal.SizeOf(typeof(float)));
-        GZV = new ComputeBuffer(WXYZ, Marshal.SizeOf(typeof(float)));
-        GXW = new ComputeBuffer(WXYZ, Marshal.SizeOf(typeof(float)));
-        GYW = new ComputeBuffer(WXYZ, Marshal.SizeOf(typeof(float)));
-        GZW = new ComputeBuffer(WXYZ, Marshal.SizeOf(typeof(float)));
-        GXU_ = new ComputeBuffer(WXYZ, Marshal.SizeOf(typeof(float)));
-        GYU_ = new ComputeBuffer(WXYZ, Marshal.SizeOf(typeof(float)));
-        GZU_ = new ComputeBuffer(WXYZ, Marshal.SizeOf(typeof(float)));
-        GXV_ = new ComputeBuffer(WXYZ, Marshal.SizeOf(typeof(float)));
-        GYV_ = new ComputeBuffer(WXYZ, Marshal.SizeOf(typeof(float)));
-        GZV_ = new ComputeBuffer(WXYZ, Marshal.SizeOf(typeof(float)));
-        GXW_ = new ComputeBuffer(WXYZ, Marshal.SizeOf(typeof(float)));
-        GYW_ = new ComputeBuffer(WXYZ, Marshal.SizeOf(typeof(float)));
-        GZW_ = new ComputeBuffer(WXYZ, Marshal.SizeOf(typeof(float)));
+        GXU = new ComputeBuffer(CO.WXYZ, Marshal.SizeOf(typeof(float)));
+        GYU = new ComputeBuffer(CO.WXYZ, Marshal.SizeOf(typeof(float)));
+        GZU = new ComputeBuffer(CO.WXYZ, Marshal.SizeOf(typeof(float)));
+        GXV = new ComputeBuffer(CO.WXYZ, Marshal.SizeOf(typeof(float)));
+        GYV = new ComputeBuffer(CO.WXYZ, Marshal.SizeOf(typeof(float)));
+        GZV = new ComputeBuffer(CO.WXYZ, Marshal.SizeOf(typeof(float)));
+        GXW = new ComputeBuffer(CO.WXYZ, Marshal.SizeOf(typeof(float)));
+        GYW = new ComputeBuffer(CO.WXYZ, Marshal.SizeOf(typeof(float)));
+        GZW = new ComputeBuffer(CO.WXYZ, Marshal.SizeOf(typeof(float)));
+        GXTP = new ComputeBuffer(CO.WXYZ, Marshal.SizeOf(typeof(float)));
+        GYTP = new ComputeBuffer(CO.WXYZ, Marshal.SizeOf(typeof(float)));
+        GZTP = new ComputeBuffer(CO.WXYZ, Marshal.SizeOf(typeof(float)));
+        GXU_ = new ComputeBuffer(CO.WXYZ, Marshal.SizeOf(typeof(float)));
+        GYU_ = new ComputeBuffer(CO.WXYZ, Marshal.SizeOf(typeof(float)));
+        GZU_ = new ComputeBuffer(CO.WXYZ, Marshal.SizeOf(typeof(float)));
+        GXV_ = new ComputeBuffer(CO.WXYZ, Marshal.SizeOf(typeof(float)));
+        GYV_ = new ComputeBuffer(CO.WXYZ, Marshal.SizeOf(typeof(float)));
+        GZV_ = new ComputeBuffer(CO.WXYZ, Marshal.SizeOf(typeof(float)));
+        GXW_ = new ComputeBuffer(CO.WXYZ, Marshal.SizeOf(typeof(float)));
+        GYW_ = new ComputeBuffer(CO.WXYZ, Marshal.SizeOf(typeof(float)));
+        GZW_ = new ComputeBuffer(CO.WXYZ, Marshal.SizeOf(typeof(float)));
+        GXTP_ = new ComputeBuffer(CO.WXYZ, Marshal.SizeOf(typeof(float)));
+        GYTP_ = new ComputeBuffer(CO.WXYZ, Marshal.SizeOf(typeof(float)));
+        GZTP_ = new ComputeBuffer(CO.WXYZ, Marshal.SizeOf(typeof(float)));
 
         //座標関係ないスカラー系
-        VOR = new ComputeBuffer(WXYZ, Marshal.SizeOf(typeof(float)));
-        YPN = new ComputeBuffer(WXYZ, Marshal.SizeOf(typeof(float)));
-        DIV = new ComputeBuffer(WXYZ, Marshal.SizeOf(typeof(float)));
+        VOR = new ComputeBuffer(CO.WXYZ, Marshal.SizeOf(typeof(float)));
+        YPN = new ComputeBuffer(CO.WXYZ, Marshal.SizeOf(typeof(float)));
+        DIV = new ComputeBuffer(CO.WXYZ, Marshal.SizeOf(typeof(float)));
 
-        WallX = new ComputeBuffer(WXYZ, Marshal.SizeOf(typeof(uint)));
-        WallY = new ComputeBuffer(WXYZ, Marshal.SizeOf(typeof(uint)));
-        WallZ = new ComputeBuffer(WXYZ, Marshal.SizeOf(typeof(uint)));
-        WallP = new ComputeBuffer(WXYZ, Marshal.SizeOf(typeof(uint)));
+        WallX = new ComputeBuffer(CO.WXYZ, Marshal.SizeOf(typeof(uint)));
+        WallY = new ComputeBuffer(CO.WXYZ, Marshal.SizeOf(typeof(uint)));
+        WallZ = new ComputeBuffer(CO.WXYZ, Marshal.SizeOf(typeof(uint)));
+        WallP = new ComputeBuffer(CO.WXYZ, Marshal.SizeOf(typeof(uint)));
 
-        //その他
-        // 弾数は1万個
-        ParticlePos = new ComputeBuffer(PARTICLENUM, Marshal.SizeOf(typeof(Vector3)));
 
-        // 配列に初期値を代入する
-        Vector3[] bullets = new Vector3[ParticlePos.count];
-        for (int i = 0; i < ParticlePos.count; i++)
+        // 弾数
+        if (CO.isPARTICLE)
         {
-            if (i % 256 < 32)
-            {
-                bullets[i] =
-                    new Vector3(
-                        Random.Range(9.0f, 11.0f), Random.Range(14.0f, 17.0f),
-                        Random.Range(14.0f, 17.0f));
-            }
-            else
-            {
-                bullets[i] =
-                    new Vector3(
-                        Random.Range(21.0f, 21.7f), Random.Range(14.0f, 17.0f),
-                        Random.Range(14.0f, 17.0f));
-            }
-        }
-        /*
-        
-	YUN[10 + 16 * WX + 16 * WX * WY] = 0.29;
-	YUN[10 + 16 * WX + 15 * WX * WY] = 0.29;
-	YUN[10 + 15 * WX + 16 * WX * WY] = 0.29;
-	YUN[10 + 15 * WX + 15 * WX * WY] = 0.29;
-    */
+            ParticlePos = new ComputeBuffer(CO.PARTICLENUM, Marshal.SizeOf(typeof(Vector3)));
 
-        // 代入
-        ParticlePos.SetData(bullets);
+            // 配列に初期値を代入する
+            Vector3[] bullets = new Vector3[ParticlePos.count];
+            for (int i = 0; i < ParticlePos.count; i++)
+            {
+                if (i % 256 < 32)
+                {
+                    bullets[i] =
+                        new Vector3(
+                            Random.Range(9.0f, 11.0f), Random.Range(14.0f, 17.0f),
+                            Random.Range(14.0f, 17.0f));
+                }
+                else
+                {
+                    bullets[i] =
+                        new Vector3(
+                            Random.Range(21.0f, 21.7f), Random.Range(14.0f, 17.0f),
+                            Random.Range(14.0f, 17.0f));
+                }
+            }
+            // 代入
+            ParticlePos.SetData(bullets);
+        }
+
 
         FillComputeBuffer();
     }
@@ -296,6 +355,7 @@ public class FluidSimCIP3D : MonoBehaviour
         FillBuffer_F(YUN);
         FillBuffer_F(YVN);
         FillBuffer_F(YWN);
+        FillBuffer_F(TPN);
         FillBuffer_F(VOR);
 
         FillBuffer_F(GXU);
@@ -307,6 +367,9 @@ public class FluidSimCIP3D : MonoBehaviour
         FillBuffer_F(GXW);
         FillBuffer_F(GYW);
         FillBuffer_F(GZW);
+        FillBuffer_F(GXTP);
+        FillBuffer_F(GYTP);
+        FillBuffer_F(GZTP);
 
         FillBuffer_F(YPN);
         FillBuffer_F(DIV);
@@ -341,47 +404,7 @@ public class FluidSimCIP3D : MonoBehaviour
         NSComputeShader.SetBuffer(kernelVeloc1, "refYWT", YWT);
 
         ////////////////////CIP
-        //U速度移流について
-        NSComputeShader.SetBuffer(kernelAdvectionCIP, "u", YU);
-        NSComputeShader.SetBuffer(kernelAdvectionCIP, "v", YVU);//Vの速度が必要
-        NSComputeShader.SetBuffer(kernelAdvectionCIP, "w", YWU);//Wの速度が必要
-        NSComputeShader.SetBuffer(kernelAdvectionCIP, "fn", YUN);
-        NSComputeShader.SetBuffer(kernelAdvectionCIP, "gxn", GXU);
-        NSComputeShader.SetBuffer(kernelAdvectionCIP, "gyn", GYU);
-        NSComputeShader.SetBuffer(kernelAdvectionCIP, "gzn", GZU);
-        NSComputeShader.SetBuffer(kernelAdvectionCIP, "GXd", GXU_);
-        NSComputeShader.SetBuffer(kernelAdvectionCIP, "GYd", GYU_);
-        NSComputeShader.SetBuffer(kernelAdvectionCIP, "GZd", GZU_);
-        NSComputeShader.SetBuffer(kernelAdvectionCIP, "Yd", YU);
-        NSComputeShader.SetBuffer(kernelAdvectionCIP, "Wall", WallX);
-
-        //V速度移流について
-        NSComputeShader.SetBuffer(kernelAdvectionCIP, "u", YUV);//Uの速度が必要
-        NSComputeShader.SetBuffer(kernelAdvectionCIP, "v", YV);
-        NSComputeShader.SetBuffer(kernelAdvectionCIP, "w", YWV);//Wの速度が必要
-        NSComputeShader.SetBuffer(kernelAdvectionCIP, "fn", YVN);
-        NSComputeShader.SetBuffer(kernelAdvectionCIP, "gxn", GXV);
-        NSComputeShader.SetBuffer(kernelAdvectionCIP, "gyn", GYV);
-        NSComputeShader.SetBuffer(kernelAdvectionCIP, "gzn", GZV);
-        NSComputeShader.SetBuffer(kernelAdvectionCIP, "GXd", GXV_);
-        NSComputeShader.SetBuffer(kernelAdvectionCIP, "GYd", GYV_);
-        NSComputeShader.SetBuffer(kernelAdvectionCIP, "GZd", GZV_);
-        NSComputeShader.SetBuffer(kernelAdvectionCIP, "Yd", YV);
-        NSComputeShader.SetBuffer(kernelAdvectionCIP, "Wall", WallY);
-
-        //W速度移流について
-        NSComputeShader.SetBuffer(kernelAdvectionCIP, "u", YUW);//Uの速度が必要
-        NSComputeShader.SetBuffer(kernelAdvectionCIP, "v", YVW);//Vの速度が必要
-        NSComputeShader.SetBuffer(kernelAdvectionCIP, "w", YW);
-        NSComputeShader.SetBuffer(kernelAdvectionCIP, "fn", YWN);
-        NSComputeShader.SetBuffer(kernelAdvectionCIP, "gxn", GXW);
-        NSComputeShader.SetBuffer(kernelAdvectionCIP, "gyn", GYW);
-        NSComputeShader.SetBuffer(kernelAdvectionCIP, "gzn", GZW);
-        NSComputeShader.SetBuffer(kernelAdvectionCIP, "GXd", GXW_);
-        NSComputeShader.SetBuffer(kernelAdvectionCIP, "GYd", GYW_);
-        NSComputeShader.SetBuffer(kernelAdvectionCIP, "GZd", GZW_);
-        NSComputeShader.SetBuffer(kernelAdvectionCIP, "Yd", YW);
-        NSComputeShader.SetBuffer(kernelAdvectionCIP, "Wall", WallZ);
+        //全部dispatchのとこでやる
         ////////////////////ここまで
 
 
@@ -439,6 +462,23 @@ public class FluidSimCIP3D : MonoBehaviour
         NSComputeShader.SetBuffer(kernelNewgrad_z, "dwx", GXW_);
         NSComputeShader.SetBuffer(kernelNewgrad_z, "dwy", GYW_);
         NSComputeShader.SetBuffer(kernelNewgrad_z, "dwz", GZW_);
+
+        //温度関連
+        NSComputeShader.SetBuffer(kernelNewgrad_t, "GX", GXTP);
+        NSComputeShader.SetBuffer(kernelNewgrad_t, "GY", GYTP);
+        NSComputeShader.SetBuffer(kernelNewgrad_t, "GZ", GZTP);
+        NSComputeShader.SetBuffer(kernelNewgrad_t, "yn", TPN);
+        NSComputeShader.SetBuffer(kernelNewgrad_t, "y", TP);
+        NSComputeShader.SetBuffer(kernelNewgrad_t, "Wall", WallP);
+        NSComputeShader.SetBuffer(kernelNewgrad_t, "dux", GXU_);
+        NSComputeShader.SetBuffer(kernelNewgrad_t, "duy", GYU_);
+        NSComputeShader.SetBuffer(kernelNewgrad_t, "duz", GZU_);
+        NSComputeShader.SetBuffer(kernelNewgrad_t, "dvx", GXV_);
+        NSComputeShader.SetBuffer(kernelNewgrad_t, "dvy", GYV_);
+        NSComputeShader.SetBuffer(kernelNewgrad_t, "dvz", GZV_);
+        NSComputeShader.SetBuffer(kernelNewgrad_t, "dwx", GXW_);
+        NSComputeShader.SetBuffer(kernelNewgrad_t, "dwy", GYW_);
+        NSComputeShader.SetBuffer(kernelNewgrad_t, "dwz", GZW_);
         ////////////////////ここまで
 
 
@@ -473,31 +513,35 @@ public class FluidSimCIP3D : MonoBehaviour
         NSComputeShader.SetBuffer(kernelparticle, "YUN", YUN);
         NSComputeShader.SetBuffer(kernelparticle, "YVN", YVN);
         NSComputeShader.SetBuffer(kernelparticle, "YWN", YWN);
-        NSComputeShader.SetBuffer(kernelparticle, "ParticlePos", ParticlePos);
+        if (CO.isPARTICLE)
+            NSComputeShader.SetBuffer(kernelparticle, "ParticlePos", ParticlePos);
 
         NSComputeShader.SetBuffer(kernelexforce0, "YUN", YUN);
         NSComputeShader.SetBuffer(kernelexforce0, "YVN", YVN);
         NSComputeShader.SetBuffer(kernelexforce0, "YWN", YWN);
+        NSComputeShader.SetBuffer(kernelexforce0, "TPN", TPN);
 
-        // テクスチャ、マテリアル関連
-        //bulletsMaterial.SetBuffer("ParticlePos", ParticlePos);
+        //texture rtセット
+        NSComputeShader.SetTexture(kernelray0, "RTout", rt);
+        NSComputeShader.SetBuffer(kernelray0, "WallP", WallP);
+        NSComputeShader.SetBuffer(kernelray0, "TPN", TPN);
     }
 
 
     void SetWall()
     { 
         //壁からセット
-        uint[] wallPini=new uint[WXYZ];
-        for (int i = 0; i < WX; i++)
+        uint[] wallPini=new uint[CO.WXYZ];
+        for (int i = 0; i < CO.WX; i++)
         {
-            for (int j = 0; j < WY; j++)
+            for (int j = 0; j < CO.WY; j++)
             {
-                for (int k = 0; k < WZ; k++) 
+                for (int k = 0; k < CO.WZ; k++) 
                 {
-                    wallPini[i + j * WX + k * WX * WY] = 255;
+                    wallPini[i + j * CO.WX + k * CO.WX * CO.WY] = 255;
                     if ((i == 0) | (k == 0) | (j == 0)) 
                     {
-                        wallPini[i + j * WX + k * WX * WY] = 0;
+                        wallPini[i + j * CO.WX + k * CO.WX * CO.WY] = 0;
                     }
                 }
                     
@@ -505,37 +549,37 @@ public class FluidSimCIP3D : MonoBehaviour
         }
 
 
-        uint[] wallxini = new uint[WXYZ];
-        uint[] wallyini = new uint[WXYZ];
-        uint[] wallzini = new uint[WXYZ];
+        uint[] wallxini = new uint[CO.WXYZ];
+        uint[] wallyini = new uint[CO.WXYZ];
+        uint[] wallzini = new uint[CO.WXYZ];
         //速度定義面を更新
-        for (int i = 0; i < WX; i++)
+        for (int i = 0; i < CO.WX; i++)
         {
-            for (int j = 0; j < WY; j++)
+            for (int j = 0; j < CO.WY; j++)
             {
-                for (int k = 0; k < WZ; k++)
+                for (int k = 0; k < CO.WZ; k++)
                 {
-                    wallxini[i + j * WX + k * WX * WY] = 255;
-                    wallyini[i + j * WX + k * WX * WY] = 255;
-                    wallzini[i + j * WX + k * WX * WY] = 255;
-                    uint t0 = wallPini[i + j * WX + k * WX * WY];
-                    uint tx = wallPini[(i - 1 + WX) % WX + j * WX + k * WX * WY];
-                    uint ty = wallPini[i + (j - 1 + WY) % WY * WX + k * WX * WY];
-                    uint tz = wallPini[i + j * WX + (k - 1 + WZ) % WZ * WX * WY];
+                    wallxini[i + j * CO.WX + k * CO.WX * CO.WY] = 255;
+                    wallyini[i + j * CO.WX + k * CO.WX * CO.WY] = 255;
+                    wallzini[i + j * CO.WX + k * CO.WX * CO.WY] = 255;
+                    uint t0 = wallPini[i + j * CO.WX + k * CO.WX * CO.WY];
+                    uint tx = wallPini[(i - 1 + CO.WX) % CO.WX + j * CO.WX + k * CO.WX * CO.WY];
+                    uint ty = wallPini[i + (j - 1 + CO.WY) % CO.WY * CO.WX + k * CO.WX * CO.WY];
+                    uint tz = wallPini[i + j * CO.WX + (k - 1 + CO.WZ) % CO.WZ * CO.WX * CO.WY];
                     
                     
                     if ((tx == 0)|(t0 == 0))
                     {
-                        wallxini[i + j * WX + k * WX * WY] = 0;
+                        wallxini[i + j * CO.WX + k * CO.WX * CO.WY] = 0;
                     }
 
                     if ((ty == 0)| (t0 == 0))
                     {
-                        wallyini[i + j * WX + k * WX * WY] = 0;
+                        wallyini[i + j * CO.WX + k * CO.WX * CO.WY] = 0;
                     }
                     if ((tz == 0) | (t0 == 0))
                     {
-                        wallzini[i + j * WX + k * WX * WY] = 0;
+                        wallzini[i + j * CO.WX + k * CO.WX * CO.WY] = 0;
                     }
                     
                 }
@@ -559,8 +603,8 @@ public class FluidSimCIP3D : MonoBehaviour
 
     void Veloc() 
     {
-        NSComputeShader.Dispatch(kernelVeloc0, WX / blockX, WY / blockY, WZ / blockZ);
-        NSComputeShader.Dispatch(kernelVeloc1, WX / blockX, WY / blockY, WZ / blockZ);
+        NSComputeShader.Dispatch(kernelVeloc0, CO.WX / CO.blockX, CO.WY / CO.blockY, CO.WZ / CO.blockZ);
+        NSComputeShader.Dispatch(kernelVeloc1, CO.WX / CO.blockX, CO.WY / CO.blockY, CO.WZ / CO.blockZ);
         return;
     }
     void CIP()
@@ -591,7 +635,7 @@ public class FluidSimCIP3D : MonoBehaviour
         NSComputeShader.SetBuffer(kernelAdvectionCIP, "GZd", GZU_);
         NSComputeShader.SetBuffer(kernelAdvectionCIP, "Yd", YU);
         NSComputeShader.SetBuffer(kernelAdvectionCIP, "Wall", WallX);
-        NSComputeShader.Dispatch(kernelAdvectionCIP, WX / blockX, WY / blockY, WZ / blockZ);
+        NSComputeShader.Dispatch(kernelAdvectionCIP, CO.WX / CO.blockX, CO.WY / CO.blockY, CO.WZ / CO.blockZ);
 
         //V速度移流について
         NSComputeShader.SetBuffer(kernelAdvectionCIP, "u", YUV);//Uの速度が必要
@@ -606,7 +650,7 @@ public class FluidSimCIP3D : MonoBehaviour
         NSComputeShader.SetBuffer(kernelAdvectionCIP, "GZd", GZV_);
         NSComputeShader.SetBuffer(kernelAdvectionCIP, "Yd", YV);
         NSComputeShader.SetBuffer(kernelAdvectionCIP, "Wall", WallY);
-        NSComputeShader.Dispatch(kernelAdvectionCIP, WX / blockX, WY / blockY, WZ / blockZ);
+        NSComputeShader.Dispatch(kernelAdvectionCIP, CO.WX / CO.blockX, CO.WY / CO.blockY, CO.WZ / CO.blockZ);
 
         //W速度移流について
         NSComputeShader.SetBuffer(kernelAdvectionCIP, "u", YUW);//Uの速度が必要
@@ -621,29 +665,49 @@ public class FluidSimCIP3D : MonoBehaviour
         NSComputeShader.SetBuffer(kernelAdvectionCIP, "GZd", GZW_);
         NSComputeShader.SetBuffer(kernelAdvectionCIP, "Yd", YW);
         NSComputeShader.SetBuffer(kernelAdvectionCIP, "Wall", WallZ);
-        NSComputeShader.Dispatch(kernelAdvectionCIP, WX / blockX, WY / blockY, WZ / blockZ);
+        NSComputeShader.Dispatch(kernelAdvectionCIP, CO.WX / CO.blockX, CO.WY / CO.blockY, CO.WZ / CO.blockZ);
+
+        if (CO.isTEMPERATURE)
+        {
+            CopyBufferToBuffer_f(GXTP_, GXTP);
+            CopyBufferToBuffer_f(GYTP_, GYTP);
+            CopyBufferToBuffer_f(GZTP_, GZTP);
+            //温度移流について
+            NSComputeShader.SetBuffer(kernelAdvectionCIP, "u", YUT);
+            NSComputeShader.SetBuffer(kernelAdvectionCIP, "v", YVT);
+            NSComputeShader.SetBuffer(kernelAdvectionCIP, "w", YWT);
+            NSComputeShader.SetBuffer(kernelAdvectionCIP, "fn", TPN);
+            NSComputeShader.SetBuffer(kernelAdvectionCIP, "gxn", GXTP);
+            NSComputeShader.SetBuffer(kernelAdvectionCIP, "gyn", GYTP);
+            NSComputeShader.SetBuffer(kernelAdvectionCIP, "gzn", GZTP);
+            NSComputeShader.SetBuffer(kernelAdvectionCIP, "GXd", GXTP_);
+            NSComputeShader.SetBuffer(kernelAdvectionCIP, "GYd", GYTP_);
+            NSComputeShader.SetBuffer(kernelAdvectionCIP, "GZd", GZTP_);
+            NSComputeShader.SetBuffer(kernelAdvectionCIP, "Yd", TP);
+            NSComputeShader.Dispatch(kernelAdvectionCIP, CO.WX / CO.blockX, CO.WY / CO.blockY, CO.WZ / CO.blockZ);
+        }
         return;
     }
 
     void Div()
     {
-        NSComputeShader.Dispatch(kerneldiv, WX / blockX, WY / blockY, WZ / blockZ);
+        NSComputeShader.Dispatch(kerneldiv, CO.WX / CO.blockX, CO.WY / CO.blockY, CO.WZ / CO.blockZ);
     }
     void Pressure()
     {
-        int loopnum = 64;
-        if (cnt < 150) loopnum += 2048;
+        int loopnum = 8;
+        if (cnt < 4) loopnum += 128;
             for (int i = 0; i < loopnum; i++) 
         {
-            NSComputeShader.Dispatch(kernelpressure0, WX / blockX, WY / blockY, WZ / blockZ);
-            NSComputeShader.Dispatch(kernelpressure1, WX / blockX, WY / blockY, WZ / blockZ);
+            NSComputeShader.Dispatch(kernelpressure0, CO.WX / CO.blockX, CO.WY / CO.blockY, CO.WZ / CO.blockZ);
+            NSComputeShader.Dispatch(kernelpressure1, CO.WX / CO.blockX, CO.WY / CO.blockY, CO.WZ / CO.blockZ);
         }
         return;
     }
     
     void Rhs()
     {
-        NSComputeShader.Dispatch(kernelrhs, WX / blockX, WY / blockY, WZ / blockZ);
+        NSComputeShader.Dispatch(kernelrhs, CO.WX / CO.blockX, CO.WY / CO.blockY, CO.WZ / CO.blockZ);
         return;
     }
     void Newgrad()
@@ -662,13 +726,22 @@ public class FluidSimCIP3D : MonoBehaviour
         CopyBufferToBuffer_f(GZW_, GZW);
 
         //U方向関連
-        NSComputeShader.Dispatch(kernelNewgrad_x, WX / blockX, WY / blockY, WZ / blockZ);
+        NSComputeShader.Dispatch(kernelNewgrad_x, CO.WX / CO.blockX, CO.WY / CO.blockY, CO.WZ / CO.blockZ);
 
         //V方向関連
-        NSComputeShader.Dispatch(kernelNewgrad_y, WX / blockX, WY / blockY, WZ / blockZ);
+        NSComputeShader.Dispatch(kernelNewgrad_y, CO.WX / CO.blockX, CO.WY / CO.blockY, CO.WZ / CO.blockZ);
 
         //W方向関連
-        NSComputeShader.Dispatch(kernelNewgrad_z, WX / blockX, WY / blockY, WZ / blockZ);
+        NSComputeShader.Dispatch(kernelNewgrad_z, CO.WX / CO.blockX, CO.WY / CO.blockY, CO.WZ / CO.blockZ);
+
+        if (CO.isTEMPERATURE)
+        {
+            //温度方向関連
+            CopyBufferToBuffer_f(GXTP_, GXTP);
+            CopyBufferToBuffer_f(GYTP_, GYTP);
+            CopyBufferToBuffer_f(GZTP_, GZTP);
+            NSComputeShader.Dispatch(kernelNewgrad_t, CO.WX / CO.blockX, CO.WY / CO.blockY, CO.WZ / CO.blockZ);
+        }
         return;
     }
 
@@ -676,7 +749,7 @@ public class FluidSimCIP3D : MonoBehaviour
 
     void Particle_Move()
     {
-        NSComputeShader.Dispatch(kernelparticle, PARTICLENUM / 64, 1, 1);
+        NSComputeShader.Dispatch(kernelparticle, CO.PARTICLENUM / 64, 1, 1);
     }
 
 
@@ -755,41 +828,35 @@ public class FluidSimCIP3D : MonoBehaviour
 
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    /// <summary>
-    /// レンダリング
-    /// </summary>
-    void OnRenderObject()
+    private RenderTexture CreateRT3(int width, int height, int depth)
     {
-        // レンダリングを開始
-        //bulletsMaterial.SetPass(0);
-        // 1万個のオブジェクトをレンダリング
-        //Graphics.DrawProceduralNow(MeshTopology.Points, ParticlePos.count);
+        var rd = new RenderTexture(width, height,0, RenderTextureFormat.RFloat);
+        rd.dimension = UnityEngine.Rendering.TextureDimension.Tex3D;
+        rd.filterMode = FilterMode.Bilinear;
+        rd.wrapMode = TextureWrapMode.Repeat;
+        rd.volumeDepth = depth;
+        //rd.colorFormat = RenderTextureFormat.RFloat;
+        rd.enableRandomWrite = true;
+        
+
+        //var tex = new RenderTexture(rd);
+        //Bilinear補間
+        //tex.filterMode = FilterMode.Bilinear;
+        //tex.wrapMode = TextureWrapMode.Repeat;
+        rd.Create();
+        return rd;
     }
 
-    /// <summary>
+
+
+
+
+
     /// 破棄
-    /// </summary>
     void OnDisable()
     {
-        // コンピュートバッファは明示的に破棄しないと怒られます
-        ParticlePos.Release();
+        if (CO.isPARTICLE)
+            ParticlePos.Release();
 
         YU.Release();
         YUN.Release();
@@ -797,6 +864,8 @@ public class FluidSimCIP3D : MonoBehaviour
         YVN.Release();
         YW.Release();
         YWN.Release();
+        TP.Release();
+        TPN.Release();
 
         YUT.Release();
         YVT.Release();
@@ -818,6 +887,9 @@ public class FluidSimCIP3D : MonoBehaviour
         GXW.Release();
         GYW.Release();
         GZW.Release();
+        GXTP.Release();
+        GYTP.Release();
+        GZTP.Release();
         GXU_.Release();
         GYU_.Release();
         GZU_.Release();
@@ -827,6 +899,9 @@ public class FluidSimCIP3D : MonoBehaviour
         GXW_.Release();
         GYW_.Release();
         GZW_.Release();
+        GXTP_.Release();
+        GYTP_.Release();
+        GZTP_.Release();
 
         //座標関係ないスカラー系
         VOR.Release();

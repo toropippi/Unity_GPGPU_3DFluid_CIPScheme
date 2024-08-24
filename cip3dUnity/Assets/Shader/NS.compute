@@ -12,6 +12,7 @@
 #pragma kernel Newgrad_x
 #pragma kernel Newgrad_y
 #pragma kernel Newgrad_z
+#pragma kernel Newgrad_t
 #pragma kernel Vorticity
 #pragma kernel ComputeBufferMemcopy_i
 #pragma kernel ComputeBufferMemcopy_f
@@ -21,24 +22,25 @@
 #pragma kernel rhs
 #pragma kernel particle_move
 #pragma kernel exforce0
+#pragma kernel ray0
 
-#define SPEEDLIMIT 1.17
+#define SPEEDLIMIT 1.0
 #define blockX 32
 #define blockY 1
 #define blockZ 1
 
-#define WX 32
-#define WY 32
-#define WZ 32
+#define WX 128
+#define WY 128
+#define WZ 128
 
 #define DT 1.0
 #define alpha 1.72
 
 //CIPで自分の実装
-#define CIPMyMETHOD
+//#define CIPMyMETHOD
 
 //newgradで自分の実装を選択
-#define NEWGRADMyMETHOD
+//#define NEWGRADMyMETHOD
 
 
 //XYZ系
@@ -58,9 +60,12 @@ StructuredBuffer<float> refYWN;
 RWStructuredBuffer<float> YUT;
 RWStructuredBuffer<float> YVT;
 RWStructuredBuffer<float> YWT;
+RWStructuredBuffer<float> TPN;
+
 StructuredBuffer<float> refYUT;
 StructuredBuffer<float> refYVT;
 StructuredBuffer<float> refYWT;
+
 
 RWStructuredBuffer<float> YUV;
 RWStructuredBuffer<float> YUW;
@@ -110,58 +115,42 @@ StructuredBuffer<uint> WallP;
 
 //その他
 RWStructuredBuffer<float3> ParticlePos;
-
-
-
+//レイマーチング関連
+RWTexture2D<float4> RTout;
+float4 campos;
+float4 camdir;
+float4 camrightdir;
+float4 camupdir;
 
 // 前回の更新からの経過時間
 float DeltaTime;
+//熱設定用
+float tmpval0;
 
-/*
-[numthreads(256, 1, 1)]
-void CSMain(uint3 id : SV_DispatchThreadID)
+
+
+
+//TPNからpos位置のデータ取得、補間して返す
+float SamplerBur3d(float3 pos)
 {
-	// それぞれの位置情報に移動ベクトルを加算
-	float4 spd = 0;
-	uint rd = id.x;
-	rd = rd + 3457349801;
-	rd *= 21896451;
-	rd += 1923458697;
-	rd = (rd >> 13) + (rd % (1 << 13)) * (1 << 13);
-	rd += 2567123453;
-	uint rd2 = rd % 65536;
-	rd /= 65536;
-	float rad1 = 0.001 * rd;
-	float rad2 = 0.001 * rd2;
-
-
-	spd.x = sin(rad1) * cos(rad2);
-	spd.y = cos(rad1) * cos(rad2);
-	spd.z = sin(rad2);
-	spd.w = 0.0;
-	Bullets[id.x] += spd * DeltaTime;
-}*/
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+	float3 p = pos;
+    p.x = clamp(p.x, 0.0, WX - 1.0);
+    p.y = clamp(p.y, 0.0, WY - 1.0);
+    p.z = clamp(p.z, 0.0, WZ - 1.0);
+    int i = (int)p.x;
+    int j = (int)p.y;
+    int k = (int)p.z;
+    float dx = p.x - i;
+    float dy = p.y - j;
+    float dz = p.z - k;
+    float c00 = TPN[i + j * WX + k * WX * WY] * (1.0 - dx) + TPN[(i + 1) + j * WX + k * WX * WY] * dx;
+    float c10 = TPN[i + (j + 1) * WX + k * WX * WY] * (1.0 - dx) + TPN[(i + 1) + (j + 1) * WX + k * WX * WY] * dx;
+    float c01 = TPN[i + j * WX + (k + 1) * WX * WY] * (1.0 - dx) + TPN[(i + 1) + j * WX + (k + 1) * WX * WY] * dx;
+    float c11 = TPN[i + (j + 1) * WX + (k + 1) * WX * WY] * (1.0 - dx) + TPN[(i + 1) + (j + 1) * WX + (k + 1) * WX * WY] * dx;
+    float c0 = c00 * (1.0 - dy) + c10 * dy;
+    float c1 = c01 * (1.0 - dy) + c11 * dy;
+    return c0 * (1.0 - dz) + c1 * dz;
+}
 
 
 
@@ -349,6 +338,66 @@ void Newgrad_z(int3 id : SV_DispatchThreadID) {
 }
 
 
+
+
+
+[numthreads(blockX, blockY, blockZ)]
+void Newgrad_t(int3 id : SV_DispatchThreadID)
+{
+	
+    int i = id.x;
+    int j = id.y;
+    int k = id.z;
+    int i0 = (i - 1 + WX) % WX;
+    int i1 = (i + 1) % WX;
+    int j0 = (j - 1 + WY) % WY;
+    int j1 = (j + 1) % WY;
+    int k0 = (k - 1 + WZ) % WZ;
+    int k1 = (k + 1) % WZ;
+    j *= WX;
+    j0 *= WX;
+    j1 *= WX;
+    k *= WX * WY;
+    k0 *= WX * WY;
+    k1 *= WX * WY;
+    int ijk = i + j + k;
+	
+#ifdef NEWGRADMyMETHOD
+	float oGX = GX[ijk];
+	float oGY = GY[ijk];
+	float oGZ = GZ[ijk];
+
+	float dudx = (dux[i + j + k] + dux[i1 + j + k]) * 0.5f * DT;
+	float dvdx = (dvx[i + j + k] + dvx[i + j1 + k]) * 0.5f * DT;
+	float dwdx = (dwx[i + j + k] + dwx[i + j + k1]) * 0.5f * DT;
+	float dudy = (duy[i + j + k] + duy[i1 + j + k]) * 0.5f * DT;	
+	float dvdy = (dvy[i + j + k] + dvy[i + j1 + k]) * 0.5f * DT;
+	float dwdy = (dwy[i + j + k] + dwy[i + j + k1]) * 0.5f * DT;
+	float dudz = (duz[i + j + k] + duz[i1 + j + k]) * 0.5f * DT;
+	float dvdz = (dvz[i + j + k] + dvz[i + j1 + k]) * 0.5f * DT;
+	float dwdz = (dwz[i + j + k] + dwz[i + j + k1]) * 0.5f * DT;
+	
+
+	if (Wall[ijk] > 128)
+	{
+		GX[ijk] = oGX + (yn[i1 + j + k] - yn[i0 + j + k] - y[i1 + j + k] + y[i0 + j + k]) * 0.5f
+			- oGX * dudx - oGY * dvdx - oGZ * dwdx;
+		GY[ijk] = oGY + (yn[i + j1 + k] - yn[i + j0 + k] - y[i + j1 + k] + y[i + j0 + k]) * 0.5f
+			- oGX * dudy - oGY * dvdy - oGZ * dwdy;
+		GZ[ijk] = oGZ + (yn[i + j + k1] - yn[i + j + k0] - y[i + j + k1] + y[i + j + k0]) * 0.5f
+			- oGX * dudz - oGY * dvdz - oGZ * dwdz;
+	}
+#else
+    if (Wall[ijk] > 128)
+    {
+        GX[ijk] += (yn[i1 + j + k] - yn[i0 + j + k] - y[i1 + j + k] + y[i0 + j + k]) * 0.5;
+        GY[ijk] += (yn[i + j1 + k] - yn[i + j0 + k] - y[i + j1 + k] + y[i + j0 + k]) * 0.5;
+        GZ[ijk] += (yn[i + j + k1] - yn[i + j + k0] - y[i + j + k1] + y[i + j + k0]) * 0.5;
+    }
+#endif
+	
+	
+}
 
 
 
@@ -805,29 +854,25 @@ void particle_move(uint id : SV_DispatchThreadID){
 //粒子座標計算
 [numthreads(1, 1, 1)]
 void exforce0(uint id : SV_DispatchThreadID) {
-
-	for (int x = 16 - 5; x < 16 + 5; x++)
+	
+    for (int x = WX / 2 - 7; x < WX / 2 + 7; x++)
 	{
-		for (int y = 16 - 5; y < 16 + 5; y++) 
+        for (int y = WY / 2 - 7; y < WY / 2 + 7; y++) 
 		{
-			YUN[9 + x * WX + y * WX * WY] = 0.3 + 0.11 * (x % 2) + 0.11 * (y % 2);
-		}
+			YUN[9 + x * WX + y * WX * WY] = 0.22 + 0.11 * (x % 2) + 0.11 * (y % 2);
+        }
 	}
 	
-	for (int x = 16 - 3; x < 16 + 3; x++)
-	{
-		for (int y = 16 - 3; y < 16 + 3; y++)
-		{
-			YUN[23 + x * WX + y * WX * WY] = -0.15 - 0.05 * (x % 3 + 2) - 0.05 * (y % 3 + 2);
-		}
-	}
 	
-	/*
-	YUN[22 + 17 * WX + 17 * WX * WY] = -0.29;
-	YUN[22 + 17 * WX + 16 * WX * WY] = -0.29;
-	YUN[22 + 16 * WX + 17 * WX * WY] = -0.29;
-	YUN[22 + 16 * WX + 16 * WX * WY] = -0.29;
-	*/
+    for (int x = WX / 2 - 3; x < WX / 2 + 3; x++)
+	{
+        for (int y = WY / 2 - 3; y < WY / 2 + 3; y++)
+		{
+			YUN[23 + x * WX + y * WX * WY] = -0.35 - 0.05 * (x % 3 + 2) - 0.05 * (y % 3 + 2);
+            if (tmpval0 != 0.0)
+                TPN[23 + x * WX + y * WX * WY] = tmpval0;
+        }
+	}
 }
 
 
@@ -858,4 +903,81 @@ void ComputeBufferMemcopy_f(uint id : SV_DispatchThreadID)
 	if (id < SIZE) {
 		DATADSTF[id+ OFFSETDST] = DATASRCF[id+ OFFSETSRC];
 	}
+}
+
+
+
+
+
+[numthreads(8, 8, 1)]
+void ray0(uint2 id : SV_DispatchThreadID)
+{
+    float4 col = float4(0.0, 0.0, 0.0, 1.0);
+    const int ScreenX = 1024;
+    const int ScreenY = 1024;
+    const float fovScale = 0.8;
+    const float intw = -5.4;
+    const float3 lgtdir = normalize(float3(0.212064895, 0.40894586721, 0.561892347890));
+    float intensity = 1.0;
+    float3 pos = campos.xyz;
+    float3 dir = normalize(camdir.xyz + camrightdir.xyz * (1.0 * id.x - 0.5 * ScreenX) / ScreenX * fovScale - camupdir.xyz * (1.0 * id.y - 0.5 * ScreenY) / ScreenY * fovScale);
+    for (int i = 0; i < 400; i++)
+    {
+        pos += 0.6 * dir;
+        bool flag = false;
+        flag = flag | (pos.x < 0.0);
+        flag = flag | (pos.y < 0.0);
+        flag = flag | (pos.z < 0.0);
+        flag = flag | (pos.x >= WX);
+        flag = flag | (pos.y >= WY);
+        flag = flag | (pos.z >= WZ);
+        if (flag)
+        {
+            continue;
+        }
+		
+		/*
+        int ix = pos.x;
+        int iy = pos.y;
+        int iz = pos.z;
+        int ijk = ix + iy * WX + iz * WX * WY;
+        float t = TPN[ijk]; //refVolume[pos];
+		*/
+        float t = SamplerBur3d(pos);
+		
+        float col2 = 0;
+        for (int j = 0; j < 20; j++)
+        {
+			//光源方向に少し伸ばして、影を作る
+            float3 pos2 = pos + 1.2 * (float) j * lgtdir;
+            flag = false;
+            flag = flag | (pos2.x < 0.0);
+            flag = flag | (pos2.y < 0.0);
+            flag = flag | (pos2.z < 0.0);
+            flag = flag | (pos2.x >= WX);
+            flag = flag | (pos2.y >= WY);
+            flag = flag | (pos2.z >= WZ);
+            if (flag)
+            {
+                continue;
+            }
+			//int ix2 = pos2.x;
+			//int iy2 = pos2.y;
+			//int iz2 = pos2.z;
+			//int ijk2 = ix2 + iy2 * WX + iz2 * WX * WY;
+            //float t2 = TPN[ijk2];
+            float t2 = SamplerBur3d(pos2);
+            col2 += t2;
+        }
+        col.xyz += intensity * t * exp(intw * col2) * float3(1.0, 0.4, 0.11) + intensity * t * float3(1.0,1.0,1.0) * 0.3;
+        intensity *= exp(0.5 * intw * t);
+        if (intensity<0.002)
+        {
+            break;
+        }
+    }
+    col.xyz *= 3.7;
+	
+	//rtout
+	RTout[id] = col;
 }

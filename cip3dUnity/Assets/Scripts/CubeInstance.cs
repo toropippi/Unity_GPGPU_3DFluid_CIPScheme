@@ -1,6 +1,7 @@
 ﻿using UnityEngine;
 using UnityEngine.Rendering;
 using System.Runtime.InteropServices;
+using Const;
 
 //great help from here, i.e. where to inject commandbuffers: https://github.com/przemyslawzaworski/Unity3D-CG-programming/blob/master/point_cloud_with_shadow.cs
 
@@ -119,7 +120,7 @@ public class CubeInstance : MonoBehaviour
         for (int j = 0; j < CubeNum; j++)
         {
             int cubeCounter = j * nVerticesPerCube;
-            Vector3 posOffset = new Vector3(-FluidSimCIP3D.WX / 2, -FluidSimCIP3D.WY / 2, -FluidSimCIP3D.WZ / 2);
+            Vector3 posOffset = new Vector3(-CO.WX / 2, -CO.WY / 2, -CO.WZ / 2);
 
             //getting cube data
             GetCube(out Vector3[] verts, out Vector3[] norms, out Vector2[] uvvs, out Color[] colz);
@@ -139,8 +140,7 @@ public class CubeInstance : MonoBehaviour
 
     private void Start()
     {
-        fluidSimCIP3D = GameObject.Find("FluidSimCIP3D").GetComponent<FluidSimCIP3D>();
-        CubeNum = FluidSimCIP3D.PARTICLENUM;
+        CubeNum = CO.PARTICLENUM;
 
         int nVertices = nVerticesPerCube * CubeNum;
         Debug.Log(nVertices);
