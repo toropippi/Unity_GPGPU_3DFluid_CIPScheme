@@ -33,6 +33,7 @@
 
 #define DT 1.0
 #define alpha 1.72
+#define CIP_TRANSVERSE_EPS 0.001f
 
 //CIPで自分の実装
 // #define CIPMyMETHOD
@@ -349,6 +350,84 @@ void Newgrad_z(int3 id : SV_DispatchThreadID) {
 }
 
 
+int cip_idx3(int x, int y, int z) {
+	return ((x + WX) % WX) + (((y + WY) % WY) + ((z + WZ) % WZ) * WY) * WX;
+}
+
+float cip_sign(float d) {
+	if (d > 0.0) { return -1.0; }
+	if (d < 0.0) { return 1.0; }
+	return 0.0;
+}
+
+float cip_value3d(int i, int j, int k, float xx, float yy, float zz) {
+	float isn = cip_sign(xx);
+	float jsn = cip_sign(yy);
+	float ksn = cip_sign(zz);
+
+	int im1x = i - (int)isn;
+	int jm1y = j - (int)jsn;
+	int km1z = k - (int)ksn;
+
+	int c000 = cip_idx3(i, j, k);
+	int c100 = cip_idx3(im1x, j, k);
+	int c010 = cip_idx3(i, jm1y, k);
+	int c001 = cip_idx3(i, j, km1z);
+	int c110 = cip_idx3(im1x, jm1y, k);
+	int c101 = cip_idx3(im1x, j, km1z);
+	int c011 = cip_idx3(i, jm1y, km1z);
+	int c111 = cip_idx3(im1x, jm1y, km1z);
+
+	float c1 = GXd[c000];
+	float g1 = GYd[c000];
+	float m1 = GZd[c000];
+	float d1 = Yd[c000];
+
+	float a1 = d1 - Yd[c100] - Yd[c010] + Yd[c110];
+	float e1 = d1 - Yd[c010] - Yd[c001] + Yd[c011];
+	float k1 = d1 - Yd[c001] - Yd[c100] + Yd[c101];
+
+	float j1 = -(GYd[c100] - g1) * isn;
+	float n1 = -(GXd[c001] - c1) * ksn;
+	float w1 = -(GZd[c010] - m1) * jsn;
+
+	float h1 = -(GXd[c010] - c1) * jsn;
+	float s1 = -(GYd[c001] - g1) * ksn;
+	float u1 = -(GZd[c100] - m1) * isn;
+
+	float i1 = j1 + h1 - a1 * isn * jsn;
+	float p1 = n1 + u1 - k1 * isn * ksn;
+	float r1 = w1 + s1 - e1 * jsn * ksn;
+
+	float t1 = Yd[c111] + Yd[c001] - a1 - Yd[c101] - Yd[c011];
+	t1 *= -isn * jsn * ksn;
+
+	j1 = -(a1 * isn - j1 * jsn);
+	n1 = -(k1 * ksn - n1 * isn);
+	w1 = -(e1 * jsn - w1 * ksn);
+
+	h1 = -(a1 * jsn - h1 * isn);
+	s1 = -(e1 * ksn - s1 * jsn);
+	u1 = -(k1 * isn - u1 * ksn);
+
+	a1 = d1 - Yd[c100];
+	e1 = d1 - Yd[c010];
+	k1 = d1 - Yd[c001];
+
+	float b1 = -3.0 * a1 + (2.0 * c1 + GXd[c100]) * isn;
+	float f1 = -3.0 * e1 + (2.0 * g1 + GYd[c010]) * jsn;
+	float l1 = -3.0 * k1 + (2.0 * m1 + GZd[c001]) * ksn;
+
+	a1 = (GXd[c100] + c1 - 2.0 * a1 * isn) * xx;
+	e1 = (GYd[c010] + g1 - 2.0 * e1 * jsn) * yy;
+	k1 = (GZd[c001] + m1 - 2.0 * k1 * ksn) * zz;
+
+	d1 += ((a1 + b1 + h1 * yy + n1 * zz) * xx + c1 + (i1 + j1 * yy + t1 * zz) * yy + (u1 * zz + p1) * zz) * xx;
+	d1 += ((e1 + f1 + s1 * zz) * yy + (w1 * zz + r1) * zz + g1) * yy + ((k1 + l1) * zz + m1) * zz;
+	return d1;
+}
+
+
 
 
 
@@ -378,6 +457,8 @@ void AdvectionCIP(int3 id : SV_DispatchThreadID) {
 	int i = id.x;
 	int j = id.y;
 	int k = id.z;
+	int j_base = j;
+	int k_base = k;
 	float a1;
 	float b1;
 	float c1;
@@ -481,19 +562,32 @@ void AdvectionCIP(int3 id : SV_DispatchThreadID) {
 	e1 = (3.0 * e1 + 2.0 * (f1 + j1 * xx + s1 * zz)) * yy + g1 + xx * (h1 * xx + i1 + t1 * zz) + zz * (r1 + w1 * zz);
 	k1 = (3.0 * k1 + 2.0 * (l1 + u1 * xx + w1 * yy)) * zz + m1 + xx * (n1 * xx + p1 + t1 * yy) + yy * (r1 + s1 * yy);
 
+	float gx_adv = a1;
+	float gy_adv = e1;
+	float gz_adv = k1;
+	if (abs(xx) < CIP_TRANSVERSE_EPS) {
+		gx_adv = 0.5 * (cip_value3d(i + 1, j_base, k_base, xx, yy, zz) - cip_value3d(i - 1, j_base, k_base, xx, yy, zz));
+	}
+	if (abs(yy) < CIP_TRANSVERSE_EPS) {
+		gy_adv = 0.5 * (cip_value3d(i, j_base + 1, k_base, xx, yy, zz) - cip_value3d(i, j_base - 1, k_base, xx, yy, zz));
+	}
+	if (abs(zz) < CIP_TRANSVERSE_EPS) {
+		gz_adv = 0.5 * (cip_value3d(i, j_base, k_base + 1, xx, yy, zz) - cip_value3d(i, j_base, k_base - 1, xx, yy, zz));
+	}
+
 
 #ifdef CIPMyMETHOD
 	//パターン1、非移流項考慮なし
 	if (Wall[ijk] >= 128) {
-		gxn[ijk] = clamp(a1, -SPEEDLIMIT, SPEEDLIMIT);
+		gxn[ijk] = clamp(gx_adv, -SPEEDLIMIT, SPEEDLIMIT);
 	}
 
 	if (Wall[ijk] >= 128) {
-		gyn[ijk] = clamp(e1, -SPEEDLIMIT, SPEEDLIMIT);
+		gyn[ijk] = clamp(gy_adv, -SPEEDLIMIT, SPEEDLIMIT);
 	}
 
 	if (Wall[ijk] >= 128) {
-		gzn[ijk] = clamp(k1, -SPEEDLIMIT, SPEEDLIMIT);
+		gzn[ijk] = clamp(gz_adv, -SPEEDLIMIT, SPEEDLIMIT);
 	}
 #else
 
@@ -501,19 +595,19 @@ void AdvectionCIP(int3 id : SV_DispatchThreadID) {
 	im1 = (i + WX - 1) % WX + j + k;
 	jm1 = (i + 1) % WX + j + k;
 	if (Wall[ijk] >= 128) {
-		gxn[ijk] = 1.0 * clamp(a1 - 0.5 * DT * (a1 * (u[jm1] - u[im1]) + e1 * (v[jm1] - v[im1]) + k1 * (w[jm1] - w[im1])), -SPEEDLIMIT, SPEEDLIMIT);
+		gxn[ijk] = 1.0 * clamp(gx_adv - 0.5 * DT * (gx_adv * (u[jm1] - u[im1]) + gy_adv * (v[jm1] - v[im1]) + gz_adv * (w[jm1] - w[im1])), -SPEEDLIMIT, SPEEDLIMIT);
 	}
 
 	im1 = ((j / WX + WY - 1) % WY) * WX + i + k;
 	jm1 = ((j / WX + 1) % WY) * WX + i + k;
 	if (Wall[ijk] >= 128) {
-		gyn[ijk] = 1.0 * clamp(e1 - 0.5 * DT * (a1 * (u[jm1] - u[im1]) + e1 * (v[jm1] - v[im1]) + k1 * (w[jm1] - w[im1])), -SPEEDLIMIT, SPEEDLIMIT);
+		gyn[ijk] = 1.0 * clamp(gy_adv - 0.5 * DT * (gx_adv * (u[jm1] - u[im1]) + gy_adv * (v[jm1] - v[im1]) + gz_adv * (w[jm1] - w[im1])), -SPEEDLIMIT, SPEEDLIMIT);
 	}
 
 	im1 = ((k / WX / WY + WZ - 1) % WZ) * WX * WY + i + j;
 	jm1 = ((k / WX / WY + 1) % WZ) * WX * WY + i + j;
 	if (Wall[ijk] >= 128) {
-		gzn[ijk] = 1.0 * clamp(k1 - 0.5 * DT * (a1 * (u[jm1] - u[im1]) + e1 * (v[jm1] - v[im1]) + k1 * (w[jm1] - w[im1])), -SPEEDLIMIT, SPEEDLIMIT);
+		gzn[ijk] = 1.0 * clamp(gz_adv - 0.5 * DT * (gx_adv * (u[jm1] - u[im1]) + gy_adv * (v[jm1] - v[im1]) + gz_adv * (w[jm1] - w[im1])), -SPEEDLIMIT, SPEEDLIMIT);
 	}
 #endif
 
