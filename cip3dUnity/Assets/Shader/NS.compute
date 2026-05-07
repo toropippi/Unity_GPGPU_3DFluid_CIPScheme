@@ -35,7 +35,7 @@
 #define alpha 1.72
 
 //CIPで自分の実装
-#define CIPMyMETHOD
+// #define CIPMyMETHOD
 
 //newgradで自分の実装を選択
 #define NEWGRADMyMETHOD
@@ -208,7 +208,7 @@ void Newgrad_x(int3 id : SV_DispatchThreadID) {
 	float dwdy = (dwy[i + j + k1] + dwy[i0 + j + k1] + dwy[i + j + k] + dwy[i0 + j + k]) * 0.25f * DT;//y方向微分の値を4つ使う
 	//float dudz = (u[i + j + k1] - u[i + j + k0]) * 0.15f * DT;
 	float dudz = duz[ijk] * DT * 0.1;
-	float dvdz = (dvz[i + j1 + k] + dvz[i0 + j1 + k] + dvz[i + j + k] + dvy[i0 + j + k]) * 0.25f * DT;//z方向微分の値を4つ使う
+	float dvdz = (dvz[i + j1 + k] + dvz[i0 + j1 + k] + dvz[i + j + k] + dvz[i0 + j + k]) * 0.25f * DT;//z方向微分の値を4つ使う
 	float dwdz = (dwz[i + j + k1] + dwz[i0 + j + k1] + dwz[i + j + k] + dwz[i0 + j + k]) * 0.25f * DT;//y方向微分の値を4つ使う
 
 	if (Wall[ijk] > 128)
@@ -404,16 +404,19 @@ void AdvectionCIP(int3 id : SV_DispatchThreadID) {
 	float yy = -v[ijk] * DT;//この移流を計算するのが"u"速度のときu座標系からみたvの速度・・・これが"v","w"もある
 	float zz = -w[ijk] * DT;//この移流を計算するのが"u"速度のときu座標系からみたwの速度・・・これが"v","w"もある
 
-	float isn;
-	float jsn;
-	float ksn;
+	float isn = 0.0;
+	float jsn = 0.0;
+	float ksn = 0.0;
 
 	//if (xx>0.0){isn=-1.0;}else{isn=1.0;}
 	//if (yy>0.0){jsn=-1.0;}else{jsn=1.0;}
 	//if (zz>0.0){ksn=-1.0;}else{ksn=1.0;}
-	isn = 1.0 - 2.0 * (xx >= 0.0);
-	jsn = 1.0 - 2.0 * (yy >= 0.0);
-	ksn = 1.0 - 2.0 * (zz >= 0.0);
+	if (xx > 0.0) { isn = -1.0; }
+	if (xx < 0.0) { isn = 1.0; }
+	if (yy > 0.0) { jsn = -1.0; }
+	if (yy < 0.0) { jsn = 1.0; }
+	if (zz > 0.0) { ksn = -1.0; }
+	if (zz < 0.0) { ksn = 1.0; }
 
 	int im1 = (i - (int)isn + WX) % WX;
 	int jm1 = ((j - (int)jsn + WY) % WY) * WX;

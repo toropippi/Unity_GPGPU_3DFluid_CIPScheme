@@ -1,0 +1,20 @@
+Base path: 'C:/Program Files/Unity/Hub/Editor/2021.3.8f1/Editor/Data', plugins path 'C:/Program Files/Unity/Hub/Editor/2021.3.8f1/Editor/Data/PlaybackEngines'
+Cmd: initializeCompiler
+
+Cmd: compileComputeKernel
+  insize=24757 file=Assets/Shader/NS.compute kernel=exforce0 cachingPP=1 ppOnly=0 stripLineD=0 buildPlatform=19 km=<UNITY_VERSION=202138> pKW=UNITY_ENABLE_REFLECTION_BUFFERS UNITY_USE_DITHER_MASK_FOR_ALPHABLENDED_SHADOWS UNITY_PBS_USE_BRDF1 UNITY_SPECCUBE_BOX_PROJECTION UNITY_SPECCUBE_BLENDING UNITY_ENABLE_DETAIL_NORMALMAP SHADER_API_DESKTOP UNITY_COLORSPACE_GAMMA UNITY_LIGHT_PROBE_PROXY_VOLUME UNITY_LIGHTMAP_FULL_HDR uKW=SHADER_STAGE_COMPUTE platform=d3d11 flags=0 reqs=16385 forceDXC=0 forceFXC=0  error: 1 plat 4 at NS.compute(569): conversion from larger type to smaller, possible loss of data
+  error: 1 plat 4 at NS.compute(607): conversion from larger type to smaller, possible loss of data
+  error: 1 plat 4 at NS.compute(813): integer modulus may be much slower, try using uints if possible.
+  error: 1 plat 4 at NS.compute(817): 'x': loop control variable conflicts with a previous declaration in the outer scope; most recent declaration will be used
+  error: 1 plat 4 at NS.compute(821): integer modulus may be much slower, try using uints if possible.
+ ok=1 outsize=1280
+
+Cmd: compileComputeKernel
+  insize=24866 file=Assets/Shader/NS.compute kernel=rhs cachingPP=1 ppOnly=0 stripLineD=0 buildPlatform=19 km=<UNITY_VERSION=202138> pKW=UNITY_ENABLE_REFLECTION_BUFFERS UNITY_USE_DITHER_MASK_FOR_ALPHABLENDED_SHADOWS UNITY_PBS_USE_BRDF1 UNITY_SPECCUBE_BOX_PROJECTION UNITY_SPECCUBE_BLENDING UNITY_ENABLE_DETAIL_NORMALMAP SHADER_API_DESKTOP UNITY_COLORSPACE_GAMMA UNITY_LIGHT_PROBE_PROXY_VOLUME UNITY_LIGHTMAP_FULL_HDR uKW=SHADER_STAGE_COMPUTE platform=d3d11 flags=0 reqs=16385 forceDXC=0 forceFXC=0  error: 1 plat 4 at NS.compute(572): conversion from larger type to smaller, possible loss of data
+  error: 1 plat 4 at NS.compute(610): conversion from larger type to smaller, possible loss of data
+  error: 1 plat 4 at NS.compute(641): integer modulus may be much slower, try using uints if possible.
+  error: 1 plat 4 at NS.compute(642): integer modulus may be much slower, try using uints if possible.
+  error: 1 plat 4 at NS.compute(643): integer modulus may be much slower, try using uints if possible.
+  error: 1 plat 4 at NS.compute(820): 'x': loop control variable conflicts with a previous declaration in the outer scope; most recent declaration will be used
+ ok=1 outsize=1799
+
