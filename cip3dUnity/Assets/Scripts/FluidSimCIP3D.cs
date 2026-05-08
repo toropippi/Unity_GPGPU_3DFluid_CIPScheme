@@ -108,7 +108,7 @@ public class FluidSimCIP3D : MonoBehaviour
 
 
         //この時点でYUN,YVN,YWNだけが最新
-        for (int loopf = 0; loopf < 32; loopf++)
+        for (int loopf = 0; loopf < 64; loopf++)
         {
             //移流フェーズ
             CopyBufferToBuffer_f(YU, YUN);
@@ -133,7 +133,7 @@ public class FluidSimCIP3D : MonoBehaviour
         }
 
         //最後にガス抜き。毎フレームやらなくてもいいかも
-        GasReleasing();
+        //GasReleasing();
         
         //キャプチャ
         /*
@@ -142,7 +142,7 @@ public class FluidSimCIP3D : MonoBehaviour
         */
     }
 
-
+    
     //圧力の平均値がどんどん高くなっている場合に平均が0になるような処理を
     void GasReleasing()
     {
