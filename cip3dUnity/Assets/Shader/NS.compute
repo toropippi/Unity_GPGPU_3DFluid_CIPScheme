@@ -554,7 +554,7 @@ void AdvectionCIP(int3 id : SV_DispatchThreadID) {
 	if (Wall[ijk] > 128) {
 		d1 += ((a1 + b1 + h1 * yy + n1 * zz) * xx + c1 + (i1 + j1 * yy + t1 * zz) * yy + (u1 * zz + p1) * zz) * xx;
 		d1 += ((e1 + f1 + s1 * zz) * yy + (w1 * zz + r1) * zz + g1) * yy + ((k1 + l1) * zz + m1) * zz;
-		fn[ijk] = clamp(d1, -2.29, 2.29);
+		fn[ijk] = clamp(d1, -SPEEDLIMIT, SPEEDLIMIT);
 	}
 
 
