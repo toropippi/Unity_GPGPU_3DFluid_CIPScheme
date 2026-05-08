@@ -22,7 +22,7 @@
 #pragma kernel particle_move
 #pragma kernel exforce0
 
-#define SPEEDLIMIT 1.17
+#define SPEEDLIMIT 1.0
 #define blockX 32
 #define blockY 1
 #define blockZ 1
