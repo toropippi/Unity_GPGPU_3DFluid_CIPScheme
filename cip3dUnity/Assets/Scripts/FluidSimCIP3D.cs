@@ -108,7 +108,7 @@ public class FluidSimCIP3D : MonoBehaviour
 
 
         //この時点でYUN,YVN,YWNだけが最新
-        for (int loopf = 0; loopf < 2; loopf++)
+        for (int loopf = 0; loopf < 32; loopf++)
         {
             //移流フェーズ
             CopyBufferToBuffer_f(YU, YUN);
@@ -130,13 +130,10 @@ public class FluidSimCIP3D : MonoBehaviour
 
             Particle_Move();
             cnt++;
-
         }
-
 
         //最後にガス抜き。毎フレームやらなくてもいいかも
         GasReleasing();
-
         
         //キャプチャ
         /*
@@ -166,7 +163,6 @@ public class FluidSimCIP3D : MonoBehaviour
         }
         YPN.SetData(cpudiv);
 
-
         //念のためdivergenceを計算して表示
         if ((cnt % 120) == 0)
         {
@@ -181,7 +177,6 @@ public class FluidSimCIP3D : MonoBehaviour
             Debug.Log(Mathf.Sqrt(gk));
         }
     }
-
 
 
     void FindKernelInit()
@@ -631,8 +626,8 @@ public class FluidSimCIP3D : MonoBehaviour
     }
     void Pressure()
     {
-        int loopnum = 64;
-        if (cnt < 150) loopnum += 2048;
+        int loopnum = 32;
+        if (cnt < 20) loopnum += 2048;
             for (int i = 0; i < loopnum; i++) 
         {
             NSComputeShader.Dispatch(kernelpressure0, WX / blockX, WY / blockY, WZ / blockZ);
